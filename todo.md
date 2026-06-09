@@ -1,0 +1,1 @@
++ versione mobile con controlli mobile

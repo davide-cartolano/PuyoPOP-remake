@@ -1,0 +1,400 @@
+import 'dart:math';
+
+import 'package:flame/components.dart';
+import 'package:flutter/material.dart' show Color, Colors;
+import 'package:flutter/services.dart'
+    show KeyDownEvent, KeyEvent, LogicalKeyboardKey;
+
+import 'grid_component.dart';
+import 'piece_shapes.dart';
+import 'playfield_grid.dart';
+import 'puyo_component.dart';
+
+/// I cinque colori tra cui viene scelto quello di ogni nuovo pezzo:
+/// Rosso, Verde, Giallo, Blu, Rosa.
+const _puyoColors = [
+  Colors.red,
+  Colors.green,
+  Colors.yellow,
+  Colors.blue,
+  Colors.pink,
+];
+
+/// Da quanti "turni" (pezzi generati) ciascun colore non viene scelto.
+///
+/// È STATICA — e non un campo di istanza — perché questa "memoria" deve
+/// persistere fra un `FallingPiece` e il successivo: ricreandola ad ogni
+/// pezzo perderemmo la cronologia e torneremmo a una scelta puramente
+/// uniforme. Tutti i pezzi della partita condividono la stessa mappa,
+/// proprio come condividono la stessa sorgente `Random`.
+final Map<Color, int> _turnsSinceColorWasPicked = {
+  for (final color in _puyoColors) color: 0,
+};
+
+/// Sceglie il colore del prossimo pezzo con una casualità "pesata": più
+/// turni sono passati dall'ultima volta che un colore è uscito, più alta
+/// è la probabilità che esca ora — e simmetricamente, il colore appena
+/// uscito riparte da un peso minimo, la probabilità più bassa possibile.
+///
+/// Tecnica: ad ogni colore assegniamo un peso pari a `turni_di_assenza +
+/// 1` (il "+1" garantisce che anche il colore appena uscito abbia un peso
+/// positivo, quindi possa comunque ripresentarsi, solo con probabilità
+/// minima). Sommando i pesi otteniamo un intervallo totale; un numero
+/// casuale in quell'intervallo "cade" in uno dei sotto-intervalli, in
+/// proporzione al peso del colore — è l'algoritmo classico della
+/// "selezione pesata" (roulette-wheel selection).
+Color _pickNextPieceColor(Random random) {
+  final weights = [
+    for (final color in _puyoColors) _turnsSinceColorWasPicked[color]! + 1,
+  ];
+  final totalWeight = weights.reduce((sum, weight) => sum + weight);
+
+  var roll = random.nextInt(totalWeight);
+  var chosenIndex = _puyoColors.length - 1;
+  for (var index = 0; index < weights.length; index++) {
+    if (roll < weights[index]) {
+      chosenIndex = index;
+      break;
+    }
+    roll -= weights[index];
+  }
+
+  // Aggiorniamo la "memoria": il colore scelto torna a zero turni di
+  // assenza (il suo peso scenderà al minimo), tutti gli altri ne
+  // accumulano uno in più (il loro peso — e quindi la loro probabilità —
+  // crescerà al prossimo giro).
+  for (var index = 0; index < _puyoColors.length; index++) {
+    final color = _puyoColors[index];
+    _turnsSinceColorWasPicked[color] = index == chosenIndex ? 0 : _turnsSinceColorWasPicked[color]! + 1;
+  }
+
+  return _puyoColors[chosenIndex];
+}
+
+/// Il pezzo attualmente controllabile dal giocatore.
+///
+/// È il "manager" che fa da contenitore per i singoli `PuyoComponent`: li
+/// crea secondo una forma scelta a caso (Singolo, Coppia, Triangolo o
+/// Tripla dritta) e di un UNICO colore casuale, li muove, li fa cadere
+/// con continuità e li ruota tutti insieme — finché non si bloccano,
+/// diventando Puyo fermi sulla griglia.
+///
+/// Da notare: una volta bloccato, questo componente NON viene rimosso
+/// dall'albero. Diventa semplicemente inerte (`_isLocked = true`) e resta
+/// lì come "contenitore" dei suoi PuyoComponent ormai fermi, che
+/// continuano ad essere disegnati esattamente dove sono. La loro presenza
+/// nella pila è tracciata altrove, in `playfieldGrid`.
+class FallingPiece extends PositionComponent with KeyboardHandler {
+  FallingPiece({
+    required this.playfieldGrid,
+    required this.onLocked,
+    Random? random,
+  })  : _random = random ?? Random(),
+        super(
+          // FallingPiece non disegna nulla di suo: è solo un contenitore
+          // logico. Lo posizioniamo all'origine (0,0) — lo stesso sistema
+          // di coordinate che GridComponent usa per le celle — così i
+          // PuyoComponent figli, che si posizionano in base a colonna/riga
+          // ASSOLUTE, risultano allineati senza bisogno di calcoli extra.
+          position: Vector2.zero(),
+          size: Vector2.zero(),
+          anchor: Anchor.topLeft,
+        ) {
+    _offsets = randomPieceOffsets(_random);
+    _spawnBlocks();
+  }
+
+  /// Colonna in cui compare ogni nuovo pezzo: quella centrale (con
+  /// arrotondamento per difetto se il numero di colonne è pari), calcolata
+  /// a partire da `GridComponent.columns` così resta corretta anche se la
+  /// larghezza della griglia cambia.
+  ///
+  /// È pubblica perché `PuyoGame` deve poterla consultare per controllare,
+  /// PRIMA di generare un pezzo, se la cella di spawn è libera: se non lo
+  /// è, la pila ha raggiunto il punto in cui i nuovi pezzi compaiono, e la
+  /// partita è persa (il classico "game over" dei puzzle game ad incastro).
+  static const int spawnColumn = (GridComponent.columns - 1) ~/ 2;
+
+  /// Quanti SECONDI impiega il pezzo ad attraversare un'intera cella,
+  /// in condizioni normali e durante il soft drop. Sono gli stessi tempi
+  /// dello step precedente: li riusiamo solo per ricavarne una VELOCITÀ
+  /// continua (vedi `_currentFallSpeed`), invece di scandire il tempo a
+  /// scatti con un timer.
+  static const double _normalFallDuration = 0.5;
+  static const double _softDropFallDuration = 0.1;
+
+  /// Modello condiviso dei Puyo già bloccati: lo interroghiamo per sapere
+  /// se una cella è libera prima di muoverci, cadere o ruotare.
+  final PlayfieldGrid playfieldGrid;
+
+  /// Invocata quando il pezzo si blocca. `PuyoGame` la userà per generare
+  /// subito il pezzo successivo: è così che otteniamo lo "spawn continuo".
+  final void Function() onLocked;
+
+  final Random _random;
+
+  /// Offset (relativi al pivot) che definiscono la forma corrente. Il
+  /// primo elemento è sempre (0, 0): è il blocco pivot, il perno di
+  /// rotazione. Viene SOSTITUITO per intero ad ogni rotazione riuscita.
+  late List<GridOffset> _offsets;
+
+  /// Posizione del blocco pivot, in coordinate di griglia ASSOLUTE. La
+  /// posizione di ogni altro blocco si ottiene sempre come `pivot + offset`.
+  int _pivotColumn = spawnColumn;
+  int _pivotRow = 0;
+
+  /// I componenti visivi, uno per offset, nello stesso ordine di `_offsets`.
+  final List<PuyoComponent> _blocks = [];
+
+  /// Una volta bloccato, il pezzo ignora sia il game loop sia la tastiera:
+  /// è lo stato di "Locking" richiesto.
+  bool _isLocked = false;
+
+  bool _isSoftDropping = false;
+
+  /// Avanzamento CONTINUO della caduta, in pixel, all'interno della riga
+  /// corrente (`_pivotRow`): cresce con continuità da 0 a `cellSize`.
+  /// La posizione verticale "vera" di ogni blocco è sempre
+  /// `riga_logica * cellSize + _fallProgressPixels`. Quando vale 0, il
+  /// pezzo è perfettamente allineato alla griglia logica.
+  double _fallProgressPixels = 0;
+
+  /// Velocità di caduta corrente, in PIXEL AL SECONDO: la ricaviamo dalla
+  /// "durata per cella" con `spazio = velocità × tempo` invertita
+  /// (`velocità = cellSize / durata`). È il modo più semplice per passare
+  /// da "tempo a scatti" a "velocità continua" mantenendo lo stesso feeling.
+  double get _currentFallSpeed {
+    final fallDuration = _isSoftDropping ? _softDropFallDuration : _normalFallDuration;
+    return GridComponent.cellSize / fallDuration;
+  }
+
+  void _spawnBlocks() {
+    // Forme monocromatiche: scegliamo UN SOLO colore per l'intero pezzo,
+    // fuori dal ciclo, e lo riusiamo per ogni blocco che lo compone. La
+    // scelta non è uniforme: `_pickNextPieceColor` pesa le probabilità in
+    // base a quanto tempo è passato dall'ultima apparizione di ogni colore.
+    final pieceColor = _pickNextPieceColor(_random);
+
+    for (final offset in _offsets) {
+      final block = PuyoComponent(
+        column: _pivotColumn + offset.column,
+        row: _pivotRow + offset.row,
+        color: pieceColor,
+      );
+      _blocks.add(block);
+      add(block);
+    }
+  }
+
+  @override
+  void update(double dt) {
+    super.update(dt);
+
+    if (_isLocked) return;
+
+    // Controlliamo PRIMA se la riga sottostante è libera: così il pezzo
+    // non "intravede" mai visivamente una cella occupata. Se non c'è
+    // spazio, il pezzo ha toccato terra qui, in questo preciso istante.
+    final canEnterRowBelow = _canPlace(
+      pivotColumn: _pivotColumn,
+      pivotRow: _pivotRow + 1,
+      offsets: _offsets,
+    );
+
+    if (!canEnterRowBelow) {
+      // Grid Snapping: azzeriamo l'avanzamento frazionario residuo, il che
+      // forza la posizione verticale a `riga_logica * cellSize`, cioè
+      // perfettamente allineata alla griglia — poi blocchiamo il pezzo lì.
+      _fallProgressPixels = 0;
+      _syncBlocksWithGrid();
+      _lock();
+      return;
+    }
+
+    // Caduta fluida: niente più "scatti" temporizzati, solo
+    // `spazio percorso = velocità × tempo trascorso` ad ogni frame.
+    _fallProgressPixels += _currentFallSpeed * dt;
+
+    if (_fallProgressPixels >= GridComponent.cellSize) {
+      // Una cella intera è stata attraversata visivamente: "commitiamo"
+      // l'avanzamento sulla riga logica successiva, riportando il residuo
+      // sotto la soglia. Sottraendo (anziché azzerando) preserviamo
+      // l'eventuale eccesso, così la velocità media resta corretta anche
+      // con frame rate variabili — la stessa tecnica già vista nello step
+      // della "gravità a scatti".
+      _pivotRow++;
+      _fallProgressPixels -= GridComponent.cellSize;
+    }
+
+    _syncBlocksWithGrid();
+  }
+
+  /// "Congela" il pezzo e lo scompone (stato di Locking):
+  /// 1. smette di rispondere a game loop e tastiera;
+  /// 2. ogni blocco viene reso un Puyo INDIPENDENTE: registrato a sé
+  ///    stante in `playfieldGrid` (non più come "membro di un pezzo", ma
+  ///    come singola cella occupata) e staccato da `FallingPiece` per
+  ///    diventare figlio diretto della griglia — proprio come avviene in
+  ///    Puyo Puyo, dove un pezzo che tocca terra si separa nei singoli
+  ///    elementi che lo componevano, ognuno libero di cadere per conto
+  ///    proprio se sotto di lui resta spazio vuoto;
+  /// 3. il contenitore ormai vuoto (`this`) viene rimosso dall'albero:
+  ///    non ha più nulla da disegnare né da gestire;
+  /// 4. avvisa `PuyoGame` tramite `onLocked`, che si occuperà di applicare
+  ///    la gravità globale, far scoppiare eventuali gruppi e — quando la
+  ///    griglia sarà stabile — generare il pezzo successivo.
+  void _lock() {
+    _isLocked = true;
+    _isSoftDropping = false;
+
+    final grid = parent;
+    for (final block in _blocks) {
+      playfieldGrid.lock(block);
+      block.removeFromParent();
+      grid?.add(block);
+    }
+    _blocks.clear();
+
+    removeFromParent();
+    onLocked();
+  }
+
+  @override
+  bool onKeyEvent(KeyEvent event, Set<LogicalKeyboardKey> keysPressed) {
+    // Stato di Locking: niente più input una volta bloccato.
+    if (_isLocked) return false;
+
+    // Soft drop: stato continuo, segue semplicemente se la freccia Giù è
+    // premuta in questo istante (si veda lo step precedente per i dettagli).
+    _isSoftDropping = keysPressed.contains(LogicalKeyboardKey.arrowDown);
+
+    // Movimento orizzontale e rotazione: azioni "a scatto", quindi
+    // reagiamo al solo fronte di discesa della pressione (KeyDownEvent),
+    // non al key-repeat del sistema operativo.
+    if (event is KeyDownEvent) {
+      if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+        _tryShiftHorizontally(-1);
+      } else if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
+        _tryShiftHorizontally(1);
+      } else if (event.logicalKey == LogicalKeyboardKey.arrowUp) {
+        _tryRotateClockwise();
+      }
+    }
+
+    return true;
+  }
+
+  /// Sposta l'intero pezzo di `columnDelta` colonne (-1 sinistra, +1
+  /// destra) SOLO se ogni blocco atterrerebbe in una cella libera. Lo
+  /// stesso identico controllo di `_stepDown` ci garantisce, in un colpo
+  /// solo, sia i limiti laterali della griglia (Boundaries) sia
+  /// l'impossibilità di sovrapporsi a Puyo già bloccati.
+  void _tryShiftHorizontally(int columnDelta) {
+    final targetColumn = _pivotColumn + columnDelta;
+    final canShift = _canPlace(
+      pivotColumn: targetColumn,
+      pivotRow: _pivotRow,
+      offsets: _offsets,
+    );
+
+    if (canShift) {
+      _pivotColumn = targetColumn;
+      _syncBlocksWithGrid();
+    }
+    // Se `canShift` è falso, l'input viene semplicemente ignorato: è
+    // esattamente il comportamento richiesto ai bordi della griglia.
+  }
+
+  /// Ruota il pezzo di 90° in senso orario attorno al blocco pivot.
+  ///
+  /// Prova, in ordine:
+  /// 1. la rotazione "sul posto" (il pivot resta dov'è);
+  /// 2. un Wall Kick di base: se la rotazione sul posto andrebbe a
+  ///    sbattere contro un bordo laterale (o contro un Puyo bloccato lì
+  ///    vicino), proviamo a traslare l'intero pezzo di una colonna verso
+  ///    l'interno della griglia e a ruotare in quella nuova posizione —
+  ///    è ciò che, in molti puzzle game, permette di ruotare un pezzo
+  ///    anche quando è incollato al muro.
+  ///
+  /// Se nemmeno il wall kick funziona, la rotazione viene semplicemente
+  /// ignorata: il pezzo resta come prima. Questo realizza, nel caso più
+  /// estremo, anche il secondo comportamento richiesto ("impedimento
+  /// della rotazione vicino al bordo").
+  void _tryRotateClockwise() {
+    final rotatedOffsets = [
+      for (final offset in _offsets) offset.rotatedClockwise(),
+    ];
+
+    if (_canPlace(pivotColumn: _pivotColumn, pivotRow: _pivotRow, offsets: rotatedOffsets)) {
+      _applyRotation(rotatedOffsets, newPivotColumn: _pivotColumn);
+      return;
+    }
+
+    for (final columnShift in const [-1, 1]) {
+      final shiftedColumn = _pivotColumn + columnShift;
+      final fits = _canPlace(
+        pivotColumn: shiftedColumn,
+        pivotRow: _pivotRow,
+        offsets: rotatedOffsets,
+      );
+      if (fits) {
+        _applyRotation(rotatedOffsets, newPivotColumn: shiftedColumn);
+        return;
+      }
+    }
+
+    // Né la rotazione sul posto né il wall kick sono validi: ignoriamo
+    // l'input e lasciamo il pezzo esattamente dov'era.
+  }
+
+  void _applyRotation(List<GridOffset> newOffsets, {required int newPivotColumn}) {
+    _offsets = newOffsets;
+    _pivotColumn = newPivotColumn;
+    _syncBlocksWithGrid();
+  }
+
+  /// Vero se OGNI blocco della forma — posizionato con il pivot in
+  /// (pivotColumn, pivotRow) e gli `offsets` indicati — cadrebbe in una
+  /// cella libera e dentro ai confini della griglia.
+  ///
+  /// Centralizzando qui il controllo, lo stesso identico metodo risponde
+  /// a tre domande diverse — "posso cadere?", "posso spostarmi di lato?",
+  /// "posso ruotare?" — semplicemente passandogli pivot e offset candidati
+  /// differenti. Una sola fonte di verità per tutte le collisioni.
+  bool _canPlace({
+    required int pivotColumn,
+    required int pivotRow,
+    required List<GridOffset> offsets,
+  }) {
+    for (final offset in offsets) {
+      final column = pivotColumn + offset.column;
+      final row = pivotRow + offset.row;
+      if (!playfieldGrid.isFree(column, row)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /// Riallinea ogni PuyoComponent figlio alla cella che gli compete
+  /// (`pivot + proprio offset`), dopo uno spostamento, una caduta o una
+  /// rotazione — propagando anche `_fallProgressPixels`, l'avanzamento
+  /// continuo della discesa. I PuyoComponent restano "ignoranti": ricevono
+  /// solo le coordinate (logiche + il piccolo offset visivo) e si
+  /// ridisegnano di conseguenza.
+  ///
+  /// Nota: spostamenti laterali e rotazioni NON azzerano
+  /// `_fallProgressPixels` — la caduta continua a scorrere senza
+  /// interruzioni "sotto" a quei movimenti, esattamente come ci si
+  /// aspetterebbe da un pezzo che cade fluido mentre lo si guida di lato.
+  void _syncBlocksWithGrid() {
+    for (var i = 0; i < _blocks.length; i++) {
+      final offset = _offsets[i];
+      _blocks[i].moveTo(
+        _pivotColumn + offset.column,
+        _pivotRow + offset.row,
+        verticalOffset: _fallProgressPixels,
+      );
+    }
+  }
+}
