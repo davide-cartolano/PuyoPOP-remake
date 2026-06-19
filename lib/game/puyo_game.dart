@@ -8,6 +8,8 @@ import 'package:flutter/material.dart' show Colors, TextStyle;
 
 import 'falling_piece.dart';
 import 'grid_component.dart';
+import 'next_piece_preview.dart';
+import 'piece_shapes.dart';
 import 'playfield_grid.dart';
 
 /// Classe principale del gioco. Estendere FlameGame ci dà accesso al
@@ -41,6 +43,17 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
     ),
   );
 
+  /// Etichetta sopra il riquadro di anteprima del prossimo pezzo.
+  final TextComponent _nextPieceLabel = TextComponent(
+    text: 'Next',
+    textRenderer: TextPaint(
+      style: const TextStyle(color: Colors.white, fontSize: 20),
+    ),
+  );
+
+  /// Riquadro che mostra il prossimo pezzo, a lato della griglia.
+  final NextPiecePreviewComponent _nextPiecePreview = NextPiecePreviewComponent();
+
   /// Punteggio corrente della partita.
   int _score = 0;
 
@@ -58,15 +71,29 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
   /// fra tutti i pezzi generati (forma e colori).
   final Random _random = Random();
 
+  /// Forma e colore del pezzo che apparirà DOPO quello attualmente in
+  /// gioco — generati un turno in anticipo proprio per poterli mostrare
+  /// nel riquadro di anteprima prima ancora che diventino il pezzo
+  /// controllabile.
+  late PieceSpec _nextSpec;
+
   @override
   Future<void> onLoad() async {
     super.onLoad();
 
     await add(_grid);
     await add(_scoreText);
+    await add(_nextPieceLabel);
+    await add(_nextPiecePreview);
     _layoutHud();
 
     _playfieldGrid = PlayfieldGrid();
+
+    // Decidiamo subito il primo "prossimo pezzo" e lo mostriamo in
+    // anteprima: `_spawnNewPiece` lo trasformerà nel pezzo controllabile
+    // alla sua prima chiamata.
+    _nextSpec = generatePieceSpec(_random);
+    _nextPiecePreview.updatePiece(_nextSpec);
 
     // Avvio dello "spawn continuo": generiamo subito il primo pezzo. Ogni
     // pezzo, quando si blocca, chiamerà a sua volta `_spawnNewPiece` (è
@@ -92,11 +119,19 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
       return;
     }
 
+    // Il pezzo che stava in anteprima diventa quello controllabile, e ne
+    // generiamo subito un altro per l'anteprima successiva: è così che
+    // il riquadro a lato della griglia mostra sempre, con un turno di
+    // anticipo, cosa arriverà dopo.
+    final spec = _nextSpec;
+    _nextSpec = generatePieceSpec(_random);
+    _nextPiecePreview.updatePiece(_nextSpec);
+
     _grid.add(
       FallingPiece(
         playfieldGrid: _playfieldGrid,
         onLocked: _resolveBoardThenSpawnNext,
-        random: _random,
+        spec: spec,
       ),
     );
   }
@@ -236,10 +271,15 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
     // significa indicare dove va il suo angolo in alto a sinistra. Lo
     // mettiamo subito a destra del bordo destro della griglia
     // (`gridHalfSize.x` oltre al centro), allineato al suo bordo superiore.
-    _scoreText.position = Vector2(
-      _grid.position.x + gridHalfSize.x + 24,
-      _grid.position.y - gridHalfSize.y,
-    );
+    final sidebarX = _grid.position.x + gridHalfSize.x + 24;
+    final sidebarTop = _grid.position.y - gridHalfSize.y;
+
+    _scoreText.position = Vector2(sidebarX, sidebarTop);
+
+    // Etichetta e anteprima del prossimo pezzo, impilate subito sotto al
+    // punteggio nella stessa colonna laterale.
+    _nextPieceLabel.position = Vector2(sidebarX, sidebarTop + 48);
+    _nextPiecePreview.position = Vector2(sidebarX, sidebarTop + 80);
   }
 }
 

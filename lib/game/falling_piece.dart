@@ -1,7 +1,5 @@
-import 'dart:math';
-
 import 'package:flame/components.dart';
-import 'package:flutter/material.dart' show Color, Colors;
+import 'package:flutter/material.dart' show Color;
 import 'package:flutter/services.dart'
     show KeyDownEvent, KeyEvent, LogicalKeyboardKey;
 
@@ -9,67 +7,6 @@ import 'grid_component.dart';
 import 'piece_shapes.dart';
 import 'playfield_grid.dart';
 import 'puyo_component.dart';
-
-/// I cinque colori tra cui viene scelto quello di ogni nuovo pezzo:
-/// Rosso, Verde, Giallo, Blu, Rosa.
-const _puyoColors = [
-  Colors.red,
-  Colors.green,
-  Colors.yellow,
-  Colors.blue,
-  Colors.pink,
-];
-
-/// Da quanti "turni" (pezzi generati) ciascun colore non viene scelto.
-///
-/// È STATICA — e non un campo di istanza — perché questa "memoria" deve
-/// persistere fra un `FallingPiece` e il successivo: ricreandola ad ogni
-/// pezzo perderemmo la cronologia e torneremmo a una scelta puramente
-/// uniforme. Tutti i pezzi della partita condividono la stessa mappa,
-/// proprio come condividono la stessa sorgente `Random`.
-final Map<Color, int> _turnsSinceColorWasPicked = {
-  for (final color in _puyoColors) color: 0,
-};
-
-/// Sceglie il colore del prossimo pezzo con una casualità "pesata": più
-/// turni sono passati dall'ultima volta che un colore è uscito, più alta
-/// è la probabilità che esca ora — e simmetricamente, il colore appena
-/// uscito riparte da un peso minimo, la probabilità più bassa possibile.
-///
-/// Tecnica: ad ogni colore assegniamo un peso pari a `turni_di_assenza +
-/// 1` (il "+1" garantisce che anche il colore appena uscito abbia un peso
-/// positivo, quindi possa comunque ripresentarsi, solo con probabilità
-/// minima). Sommando i pesi otteniamo un intervallo totale; un numero
-/// casuale in quell'intervallo "cade" in uno dei sotto-intervalli, in
-/// proporzione al peso del colore — è l'algoritmo classico della
-/// "selezione pesata" (roulette-wheel selection).
-Color _pickNextPieceColor(Random random) {
-  final weights = [
-    for (final color in _puyoColors) _turnsSinceColorWasPicked[color]! + 1,
-  ];
-  final totalWeight = weights.reduce((sum, weight) => sum + weight);
-
-  var roll = random.nextInt(totalWeight);
-  var chosenIndex = _puyoColors.length - 1;
-  for (var index = 0; index < weights.length; index++) {
-    if (roll < weights[index]) {
-      chosenIndex = index;
-      break;
-    }
-    roll -= weights[index];
-  }
-
-  // Aggiorniamo la "memoria": il colore scelto torna a zero turni di
-  // assenza (il suo peso scenderà al minimo), tutti gli altri ne
-  // accumulano uno in più (il loro peso — e quindi la loro probabilità —
-  // crescerà al prossimo giro).
-  for (var index = 0; index < _puyoColors.length; index++) {
-    final color = _puyoColors[index];
-    _turnsSinceColorWasPicked[color] = index == chosenIndex ? 0 : _turnsSinceColorWasPicked[color]! + 1;
-  }
-
-  return _puyoColors[chosenIndex];
-}
 
 /// Il pezzo attualmente controllabile dal giocatore.
 ///
@@ -88,8 +25,9 @@ class FallingPiece extends PositionComponent with KeyboardHandler {
   FallingPiece({
     required this.playfieldGrid,
     required this.onLocked,
-    Random? random,
-  })  : _random = random ?? Random(),
+    required PieceSpec spec,
+  })  : _offsets = spec.offsets,
+        _color = spec.color,
         super(
           // FallingPiece non disegna nulla di suo: è solo un contenitore
           // logico. Lo posizioniamo all'origine (0,0) — lo stesso sistema
@@ -100,7 +38,6 @@ class FallingPiece extends PositionComponent with KeyboardHandler {
           size: Vector2.zero(),
           anchor: Anchor.topLeft,
         ) {
-    _offsets = randomPieceOffsets(_random);
     _spawnBlocks();
   }
 
@@ -131,12 +68,16 @@ class FallingPiece extends PositionComponent with KeyboardHandler {
   /// subito il pezzo successivo: è così che otteniamo lo "spawn continuo".
   final void Function() onLocked;
 
-  final Random _random;
-
   /// Offset (relativi al pivot) che definiscono la forma corrente. Il
   /// primo elemento è sempre (0, 0): è il blocco pivot, il perno di
   /// rotazione. Viene SOSTITUITO per intero ad ogni rotazione riuscita.
-  late List<GridOffset> _offsets;
+  List<GridOffset> _offsets;
+
+  /// Colore, unico per tutto il pezzo: deciso una volta per tutte da
+  /// `PieceSpec`, all'esterno di questa classe (vedi `PuyoGame`), così che
+  /// possa essere conosciuto — e mostrato in anteprima — un turno prima
+  /// che diventi davvero il pezzo controllabile.
+  final Color _color;
 
   /// Posizione del blocco pivot, in coordinate di griglia ASSOLUTE. La
   /// posizione di ogni altro blocco si ottiene sempre come `pivot + offset`.
@@ -169,17 +110,14 @@ class FallingPiece extends PositionComponent with KeyboardHandler {
   }
 
   void _spawnBlocks() {
-    // Forme monocromatiche: scegliamo UN SOLO colore per l'intero pezzo,
-    // fuori dal ciclo, e lo riusiamo per ogni blocco che lo compone. La
-    // scelta non è uniforme: `_pickNextPieceColor` pesa le probabilità in
-    // base a quanto tempo è passato dall'ultima apparizione di ogni colore.
-    final pieceColor = _pickNextPieceColor(_random);
-
+    // Forme monocromatiche: tutti i blocchi del pezzo condividono lo
+    // stesso `_color`, deciso una volta per tutte dallo `PieceSpec`
+    // ricevuto in costruzione.
     for (final offset in _offsets) {
       final block = PuyoComponent(
         column: _pivotColumn + offset.column,
         row: _pivotRow + offset.row,
-        color: pieceColor,
+        color: _color,
       );
       _blocks.add(block);
       add(block);

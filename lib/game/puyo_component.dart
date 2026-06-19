@@ -109,66 +109,75 @@ class PuyoComponent extends PositionComponent {
     final radius = (size.x - padding * 2) / 2;
     final center = Offset(size.x / 2, size.y / 2);
 
-    // Corpo: un gradiente radiale (più chiaro verso l'alto a sinistra)
-    // simula una piccola fonte di luce e dà al cerchio l'aspetto lucido e
-    // "gommoso" tipico dei Puyo, invece di un semplice riempimento piatto.
-    final bodyPaint = Paint()
-      ..shader = Gradient.radial(
-        center.translate(-radius * 0.35, -radius * 0.35),
-        radius * 1.4,
-        [_lighten(color, 0.45), color],
-      );
-    canvas.drawCircle(center, radius, bodyPaint);
-
-    final outlinePaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.5
-      ..color = _darken(color, 0.35);
-    canvas.drawCircle(center, radius, outlinePaint);
-
-    _renderFace(canvas, center, radius);
+    paintPuyo(canvas, center: center, radius: radius, color: color);
   }
-
-  /// Disegna gli occhi (bianchi con pupilla e riflesso) e la boccuccia: è
-  /// questo dettaglio del viso, più del colore, a rendere ogni Puyo
-  /// riconoscibile come un personaggio e non solo come una pallina colorata.
-  void _renderFace(Canvas canvas, Offset bodyCenter, double bodyRadius) {
-    final eyeOffset = Offset(bodyRadius * 0.38, -bodyRadius * 0.05);
-    final eyeRadius = bodyRadius * 0.34;
-    final pupilRadius = eyeRadius * 0.48;
-
-    final eyeWhitePaint = Paint()..color = const Color(0xFFFFFFFF);
-    final pupilPaint = Paint()..color = const Color(0xFF1B1B2F);
-    final shinePaint = Paint()..color = const Color(0xFFFFFFFF);
-
-    for (final side in [-1, 1]) {
-      final eyeCenter = bodyCenter.translate(eyeOffset.dx * side, eyeOffset.dy);
-
-      canvas.drawCircle(eyeCenter, eyeRadius, eyeWhitePaint);
-
-      final pupilCenter = eyeCenter.translate(0, eyeRadius * 0.1);
-      canvas.drawCircle(pupilCenter, pupilRadius, pupilPaint);
-
-      final shineCenter = pupilCenter.translate(-pupilRadius * 0.35, -pupilRadius * 0.35);
-      canvas.drawCircle(shineCenter, pupilRadius * 0.35, shinePaint);
-    }
-
-    // Boccuccia: un semplice arco a "v" rovesciata sotto gli occhi.
-    final mouthPaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = bodyRadius * 0.1
-      ..strokeCap = StrokeCap.round
-      ..color = const Color(0xFF1B1B2F);
-
-    final mouthRect = Rect.fromCenter(
-      center: bodyCenter.translate(0, bodyRadius * 0.32),
-      width: bodyRadius * 0.7,
-      height: bodyRadius * 0.5,
-    );
-    canvas.drawArc(mouthRect, 0.15 * pi, pi - 0.3 * pi, false, mouthPaint);
-  }
-
-  Color _lighten(Color base, double amount) => Color.lerp(base, const Color(0xFFFFFFFF), amount)!;
-
-  Color _darken(Color base, double amount) => Color.lerp(base, const Color(0xFF000000), amount)!;
 }
+
+/// Disegna un Puyo (corpo lucido + viso) centrato in `center`, con il
+/// raggio indicato. È una funzione libera, non un metodo di
+/// `PuyoComponent`, proprio per poter essere riusata anche da
+/// `NextPiecePreviewComponent`, che deve disegnare la stessa identica
+/// faccina ma più piccola e senza essere un Puyo "vero" della griglia.
+void paintPuyo(Canvas canvas, {required Offset center, required double radius, required Color color}) {
+  // Corpo: un gradiente radiale (più chiaro verso l'alto a sinistra)
+  // simula una piccola fonte di luce e dà al cerchio l'aspetto lucido e
+  // "gommoso" tipico dei Puyo, invece di un semplice riempimento piatto.
+  final bodyPaint = Paint()
+    ..shader = Gradient.radial(
+      center.translate(-radius * 0.35, -radius * 0.35),
+      radius * 1.4,
+      [_lighten(color, 0.45), color],
+    );
+  canvas.drawCircle(center, radius, bodyPaint);
+
+  final outlinePaint = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 1.5
+    ..color = _darken(color, 0.35);
+  canvas.drawCircle(center, radius, outlinePaint);
+
+  _renderFace(canvas, center, radius);
+}
+
+/// Disegna gli occhi (bianchi con pupilla e riflesso) e la boccuccia: è
+/// questo dettaglio del viso, più del colore, a rendere ogni Puyo
+/// riconoscibile come un personaggio e non solo come una pallina colorata.
+void _renderFace(Canvas canvas, Offset bodyCenter, double bodyRadius) {
+  final eyeOffset = Offset(bodyRadius * 0.38, -bodyRadius * 0.05);
+  final eyeRadius = bodyRadius * 0.34;
+  final pupilRadius = eyeRadius * 0.48;
+
+  final eyeWhitePaint = Paint()..color = const Color(0xFFFFFFFF);
+  final pupilPaint = Paint()..color = const Color(0xFF1B1B2F);
+  final shinePaint = Paint()..color = const Color(0xFFFFFFFF);
+
+  for (final side in [-1, 1]) {
+    final eyeCenter = bodyCenter.translate(eyeOffset.dx * side, eyeOffset.dy);
+
+    canvas.drawCircle(eyeCenter, eyeRadius, eyeWhitePaint);
+
+    final pupilCenter = eyeCenter.translate(0, eyeRadius * 0.1);
+    canvas.drawCircle(pupilCenter, pupilRadius, pupilPaint);
+
+    final shineCenter = pupilCenter.translate(-pupilRadius * 0.35, -pupilRadius * 0.35);
+    canvas.drawCircle(shineCenter, pupilRadius * 0.35, shinePaint);
+  }
+
+  // Boccuccia: un semplice arco a "v" rovesciata sotto gli occhi.
+  final mouthPaint = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = bodyRadius * 0.1
+    ..strokeCap = StrokeCap.round
+    ..color = const Color(0xFF1B1B2F);
+
+  final mouthRect = Rect.fromCenter(
+    center: bodyCenter.translate(0, bodyRadius * 0.32),
+    width: bodyRadius * 0.7,
+    height: bodyRadius * 0.5,
+  );
+  canvas.drawArc(mouthRect, 0.15 * pi, pi - 0.3 * pi, false, mouthPaint);
+}
+
+Color _lighten(Color base, double amount) => Color.lerp(base, const Color(0xFFFFFFFF), amount)!;
+
+Color _darken(Color base, double amount) => Color.lerp(base, const Color(0xFF000000), amount)!;

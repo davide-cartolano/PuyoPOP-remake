@@ -1,5 +1,7 @@
 import 'dart:math';
 
+import 'package:flutter/material.dart' show Color, Colors;
+
 /// Una coppia (colonna, riga) che rappresenta uno spostamento RELATIVO
 /// all'interno della griglia. La usiamo per due cose:
 /// - descrivere la "forma" di un pezzo, come elenco di posizioni rispetto
@@ -137,4 +139,88 @@ List<GridOffset> _withRandomInitialAngle(List<GridOffset> offsets, Random random
     rotated = [for (final offset in rotated) offset.rotatedClockwise()];
   }
   return rotated;
+}
+
+/// Forma e colore di un pezzo, già decisi insieme. Generarli in coppia
+/// (invece che separatamente, come faceva prima `FallingPiece`) è ciò che
+/// permette di calcolare "il prossimo pezzo" con un anticipo di un turno:
+/// lo si genera una volta, lo si usa per riempire l'anteprima a schermo, e
+/// solo quando il pezzo CORRENTE si blocca lo si passa davvero a un nuovo
+/// `FallingPiece`.
+class PieceSpec {
+  const PieceSpec({required this.offsets, required this.color});
+
+  final List<GridOffset> offsets;
+  final Color color;
+}
+
+/// I cinque colori tra cui viene scelto quello di ogni nuovo pezzo:
+/// Rosso, Verde, Giallo, Blu, Rosa.
+const _puyoColors = [
+  Colors.red,
+  Colors.green,
+  Colors.yellow,
+  Colors.blue,
+  Colors.pink,
+];
+
+/// Da quanti "turni" (pezzi generati) ciascun colore non viene scelto.
+///
+/// È STATICA — e non un campo di istanza — perché questa "memoria" deve
+/// persistere fra un pezzo e il successivo: ricreandola ad ogni pezzo
+/// perderemmo la cronologia e torneremmo a una scelta puramente uniforme.
+/// Tutti i pezzi della partita condividono la stessa mappa, proprio come
+/// condividono la stessa sorgente `Random`.
+final Map<Color, int> _turnsSinceColorWasPicked = {
+  for (final color in _puyoColors) color: 0,
+};
+
+/// Sceglie il colore del prossimo pezzo con una casualità "pesata": più
+/// turni sono passati dall'ultima volta che un colore è uscito, più alta
+/// è la probabilità che esca ora — e simmetricamente, il colore appena
+/// uscito riparte da un peso minimo, la probabilità più bassa possibile.
+///
+/// Tecnica: ad ogni colore assegniamo un peso pari a `turni_di_assenza +
+/// 1` (il "+1" garantisce che anche il colore appena uscito abbia un peso
+/// positivo, quindi possa comunque ripresentarsi, solo con probabilità
+/// minima). Sommando i pesi otteniamo un intervallo totale; un numero
+/// casuale in quell'intervallo "cade" in uno dei sotto-intervalli, in
+/// proporzione al peso del colore — è l'algoritmo classico della
+/// "selezione pesata" (roulette-wheel selection).
+Color _pickNextPieceColor(Random random) {
+  final weights = [
+    for (final color in _puyoColors) _turnsSinceColorWasPicked[color]! + 1,
+  ];
+  final totalWeight = weights.reduce((sum, weight) => sum + weight);
+
+  var roll = random.nextInt(totalWeight);
+  var chosenIndex = _puyoColors.length - 1;
+  for (var index = 0; index < weights.length; index++) {
+    if (roll < weights[index]) {
+      chosenIndex = index;
+      break;
+    }
+    roll -= weights[index];
+  }
+
+  // Aggiorniamo la "memoria": il colore scelto torna a zero turni di
+  // assenza (il suo peso scenderà al minimo), tutti gli altri ne
+  // accumulano uno in più (il loro peso — e quindi la loro probabilità —
+  // crescerà al prossimo giro).
+  for (var index = 0; index < _puyoColors.length; index++) {
+    final color = _puyoColors[index];
+    _turnsSinceColorWasPicked[color] = index == chosenIndex ? 0 : _turnsSinceColorWasPicked[color]! + 1;
+  }
+
+  return _puyoColors[chosenIndex];
+}
+
+/// Genera la coppia forma+colore del prossimo pezzo. È la funzione che
+/// `PuyoGame` chiama un turno in anticipo, per poter mostrare l'anteprima
+/// a schermo prima ancora che quel pezzo diventi quello controllabile.
+PieceSpec generatePieceSpec(Random random) {
+  return PieceSpec(
+    offsets: randomPieceOffsets(random),
+    color: _pickNextPieceColor(random),
+  );
 }
