@@ -242,3 +242,4 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
     );
   }
 }
+
