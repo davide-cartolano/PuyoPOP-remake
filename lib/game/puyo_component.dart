@@ -33,6 +33,15 @@ class PuyoComponent extends PositionComponent {
   /// possono "scoppiare" insieme.
   final Color color;
 
+  /// Vero per un Puyo "spazzatura" (bianco), inviato dall'avversario dopo
+  /// una sua combo (vedi `PuyoGame._resolveBoardThenSpawnNext` e
+  /// `PlayfieldGrid.findAdjacentGarbage`). Un Puyo spazzatura non si unisce
+  /// mai a un gruppo — il suo colore non coincide con nessuno dei colori
+  /// di gioco — ma scompare insieme a un gruppo che scoppia se gli è
+  /// adiacente: è così che ostacola l'avversario senza poter scoppiare da
+  /// solo.
+  final bool isGarbage;
+
   /// Sorgente di casualità per il battito di ciglia (vedi sotto): è
   /// un'istanza per Puyo, così ognuno sbatte le palpebre con un proprio
   /// ritmo indipendente, invece che tutti all'unisono.
@@ -52,6 +61,7 @@ class PuyoComponent extends PositionComponent {
     required this.column,
     required this.row,
     required this.color,
+    this.isGarbage = false,
   }) : super(
           // Il Puyo occupa esattamente una cella della griglia.
           size: Vector2.all(GridComponent.cellSize),
@@ -148,6 +158,14 @@ class PuyoComponent extends PositionComponent {
     final radius = (size.x - padding * 2) / 2;
     final center = Offset(size.x / 2, size.y / 2);
 
+    if (isGarbage) {
+      // I Puyo spazzatura non hanno un viso: sono un semplice "macigno"
+      // bianco, visivamente distinto a colpo d'occhio dai Puyo colorati
+      // con cui il giocatore deve invece formare gruppi.
+      paintGarbagePuyo(canvas, center: center, radius: radius);
+      return;
+    }
+
     paintPuyo(canvas, center: center, radius: radius, color: color, eyesClosed: _blinkTimeRemaining > 0);
   }
 
@@ -195,6 +213,28 @@ class PuyoComponent extends PositionComponent {
       ]),
     );
   }
+}
+
+/// Disegna un Puyo spazzatura: una sfera grigio chiaro/bianca, lucida come
+/// un Puyo normale ma senza viso — è il "macigno" che il gioco originale
+/// fa cadere sull'avversario dopo una combo, e che non scoppia mai da
+/// solo (vedi `PuyoComponent.isGarbage`).
+void paintGarbagePuyo(Canvas canvas, {required Offset center, required double radius}) {
+  const garbageColor = Color(0xFFE8E8F0);
+
+  final bodyPaint = Paint()
+    ..shader = Gradient.radial(
+      center.translate(-radius * 0.35, -radius * 0.35),
+      radius * 1.4,
+      [const Color(0xFFFFFFFF), garbageColor],
+    );
+  canvas.drawCircle(center, radius, bodyPaint);
+
+  final outlinePaint = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 1.5
+    ..color = _darken(garbageColor, 0.35);
+  canvas.drawCircle(center, radius, outlinePaint);
 }
 
 /// Disegna un Puyo (corpo lucido + viso) centrato in `center`, con il

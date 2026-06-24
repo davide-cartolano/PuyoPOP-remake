@@ -60,10 +60,59 @@ class _GameScreenState extends State<GameScreen> {
     });
   }
 
+  /// Accumulatore dello spostamento orizzontale del dito, in pixel
+  /// logici, da quando è iniziato il gesto corrente: l'azione (un passo a
+  /// sinistra o a destra) scatta non appena supera `_dragStepThreshold`,
+  /// in modo che lo spostamento touch abbia la stessa "grana a celle"
+  /// del movimento da tastiera, invece di seguire il dito pixel per pixel.
+  double _dragAccumulatorX = 0;
+
+  /// Quanti pixel logici di trascinamento orizzontale corrispondono a
+  /// UNA colonna. Un valore comodo da "swipare" col dito senza dover
+  /// percorrere l'intera larghezza della griglia per un solo passo.
+  static const double _dragStepThreshold = 32;
+
+  void _onPanUpdate(DragUpdateDetails details) {
+    _dragAccumulatorX += details.delta.dx;
+    while (_dragAccumulatorX > _dragStepThreshold) {
+      _game.moveCurrentPieceRight();
+      _dragAccumulatorX -= _dragStepThreshold;
+    }
+    while (_dragAccumulatorX < -_dragStepThreshold) {
+      _game.moveCurrentPieceLeft();
+      _dragAccumulatorX += _dragStepThreshold;
+    }
+
+    // Un trascinamento verso il basso attiva la caduta accelerata, esattamente
+    // come tenere premuta la freccia Giù da tastiera — resta attiva finché il
+    // dito non si alza (`_onPanEnd`/`_onPanCancel`).
+    if (details.delta.dy > 0) {
+      _game.setCurrentPieceSoftDropping(true);
+    }
+  }
+
+  void _onPanEnd(DragEndDetails details) {
+    _dragAccumulatorX = 0;
+    _game.setCurrentPieceSoftDropping(false);
+  }
+
+  void _onPanCancel() {
+    _dragAccumulatorX = 0;
+    _game.setCurrentPieceSoftDropping(false);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: GameWidget(game: _game),
+      body: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        // Tap: ruota il pezzo — l'equivalente touch della freccia Su.
+        onTap: _game.rotateCurrentPiece,
+        onPanUpdate: _onPanUpdate,
+        onPanEnd: _onPanEnd,
+        onPanCancel: _onPanCancel,
+        child: GameWidget(game: _game),
+      ),
     );
   }
 }

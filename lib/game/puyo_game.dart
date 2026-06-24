@@ -23,7 +23,11 @@ import 'puyo_component.dart';
 /// implementano `KeyboardHandler`" (come il nostro FallingPiece).
 /// Senza questo mixin, gli eventi tastiera non arriverebbero ai componenti.
 class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
-  PuyoGame({required this.onGameOver, this.isAiControlled = false});
+  PuyoGame({
+    required this.onGameOver,
+    this.isAiControlled = false,
+    this.onSendGarbage,
+  });
 
   /// Invocata quando la partita finisce (pila arrivata fino alla cella di
   /// spawn). `PuyoGame` è puro Flame/Dart e non ha un `BuildContext`: è
@@ -36,9 +40,52 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
   /// quella del giocatore umano nella modalità "Gioca contro CPU".
   final bool isAiControlled;
 
+  /// Invocata ogni volta che una combo di questa partita genera Puyo
+  /// spazzatura da inviare all'avversario (vedi `_resolveBoardThenSpawnNext`).
+  /// `VersusScreen` collega questa callback all'altra istanza di `PuyoGame`,
+  /// chiamandone `receiveGarbage`: `PuyoGame` di per sé non sa nulla
+  /// dell'avversario, sa solo "quanti Puyo spazzatura ho generato".
+  /// `null` nella modalità "Gioca da solo", dove non esiste un avversario.
+  final void Function(int garbageCount)? onSendGarbage;
+
+  /// Quanti punti di una combo (la stessa formula di `_scoreForLink`)
+  /// servono per generare UN Puyo spazzatura da inviare all'avversario.
+  /// È lo stesso ordine di grandezza usato nel gioco originale: rende le
+  /// catene lunghe — che valgono esponenzialmente più punti, vedi
+  /// `_chainPowerTable` — sproporzionatamente più pericolose delle combo
+  /// singole, esattamente come ci si aspetta da un puzzle game competitivo.
+  static const int _nuisancePointsPerGarbage = 70;
+
+  /// Puyo spazzatura ricevuti dall'avversario ma non ancora fatti cadere:
+  /// si accumulano qui finché il pezzo corrente non si blocca, e cadono
+  /// tutti insieme subito prima che ne nasca uno nuovo (vedi
+  /// `_dropPendingGarbage`) — mai a metà di una mossa del giocatore.
+  int _pendingGarbage = 0;
+
+  /// Invocato da `VersusScreen` quando l'avversario fa una combo: accoda
+  /// i Puyo spazzatura generati, che cadranno alla prossima occasione.
+  void receiveGarbage(int count) {
+    _pendingGarbage += count;
+  }
+
   /// Punteggio corrente, esposto in lettura per chi ospita il gioco (es.
   /// `VersusScreen`, che lo usa per stabilire chi ha vinto la partita).
   int get score => _score;
+
+  /// Il pezzo attualmente controllabile, o `null` fra un lock e il prossimo
+  /// spawn. `GameScreen` lo pilota indirettamente tramite i metodi
+  /// `moveCurrentPieceLeft/Right`, `rotateCurrentPiece` e
+  /// `setCurrentPieceSoftDropping`, per tradurre i gesti touch (swipe, tap)
+  /// in comandi — `FallingPiece` di per sé risponde solo alla tastiera.
+  FallingPiece? _currentPiece;
+
+  void moveCurrentPieceLeft() => _currentPiece?.moveLeft();
+
+  void moveCurrentPieceRight() => _currentPiece?.moveRight();
+
+  void rotateCurrentPiece() => _currentPiece?.rotateClockwise();
+
+  void setCurrentPieceSoftDropping(bool value) => _currentPiece?.setSoftDropping(value);
 
   // Creiamo subito l'istanza (non in onLoad): Flame può chiamare
   // onGameResize prima che onLoad termini, e a quel punto questo campo
@@ -110,7 +157,7 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
     // Avvio dello "spawn continuo": generiamo subito il primo pezzo. Ogni
     // pezzo, quando si blocca, chiamerà a sua volta `_spawnNewPiece` (è
     // la callback `onLocked` che gli passiamo), generando il successivo.
-    _spawnNewPiece();
+    await _spawnNewPiece();
   }
 
   @override
@@ -136,7 +183,15 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
   /// (colonna centrale, riga più in alto) sia libera: se la pila di Puyo
   /// bloccati è arrivata fin lì, non c'è più spazio per un nuovo pezzo —
   /// è la condizione classica di "game over" nei puzzle game ad incastro.
-  void _spawnNewPiece() {
+  Future<void> _spawnNewPiece() async {
+    // I Puyo spazzatura ricevuti dall'avversario cadono ORA, prima di
+    // generare il pezzo successivo: mai a metà di una mossa del
+    // giocatore. Possono anche, da soli, riempire la cella di spawn — è
+    // la combo dell'avversario, a quel punto, a causare il game over.
+    if (_pendingGarbage > 0) {
+      await _dropPendingGarbage();
+    }
+
     final spawnCellIsFree = _playfieldGrid.isFree(FallingPiece.spawnColumn, 0);
     if (!spawnCellIsFree) {
       _triggerGameOver();
@@ -156,10 +211,56 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
       onLocked: _resolveBoardThenSpawnNext,
       spec: spec,
     );
+    _currentPiece = piece;
     _grid.add(piece);
 
     if (isAiControlled) {
       _grid.add(AiController(piece: piece, playfieldGrid: _playfieldGrid));
+    }
+  }
+
+  /// Fa cadere tutti i Puyo spazzatura accumulati in `_pendingGarbage`,
+  /// distribuendoli a caso fra le colonne — un'"ondata" per volta (al più
+  /// uno per colonna, così le cadute in parallelo non si pestano i piedi),
+  /// finché non ne restano più o la griglia non ha più spazio.
+  Future<void> _dropPendingGarbage() async {
+    var remaining = _pendingGarbage;
+    _pendingGarbage = 0;
+
+    while (remaining > 0) {
+      final shuffledColumns = List.generate(GridComponent.columns, (column) => column)..shuffle(_random);
+      final fallingAnimations = <Future<void>>[];
+
+      for (final column in shuffledColumns) {
+        if (remaining <= 0) break;
+
+        final landingRow = _playfieldGrid.landingRowForGarbage(column);
+        if (landingRow == null) continue; // colonna già piena: questo Puyo va perso.
+        remaining--;
+
+        final garbagePuyo = PuyoComponent(
+          column: column,
+          row: landingRow,
+          color: Colors.white,
+          isGarbage: true,
+        );
+        _playfieldGrid.lock(garbagePuyo);
+
+        // Lo facciamo nascere un filo sopra al bordo della griglia, così
+        // `fallTo` lo anima scendendo fino alla sua cella di destinazione
+        // — esattamente come la caduta per gravità dei Puyo già in gioco.
+        garbagePuyo.position = Vector2(column * GridComponent.cellSize, -GridComponent.cellSize);
+        _grid.add(garbagePuyo);
+        fallingAnimations.add(garbagePuyo.fallTo());
+      }
+
+      if (fallingAnimations.isEmpty) {
+        // Nessuna colonna aveva spazio in questa ondata: il resto dei
+        // Puyo spazzatura in eccesso viene semplicemente scartato.
+        break;
+      }
+
+      await Future.wait(fallingAnimations);
     }
   }
 
@@ -183,12 +284,23 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
   /// tutta la catena in un solo istante. Solo quando il `while` termina
   /// (griglia stabile) generiamo il prossimo pezzo.
   Future<void> _resolveBoardThenSpawnNext() async {
+    // Il pezzo si è bloccato: da questo momento (e finché non ne nasce un
+    // altro) non c'è alcun pezzo controllabile a cui inoltrare i comandi
+    // touch — vedi `moveCurrentPieceLeft/Right`, `rotateCurrentPiece`.
+    _currentPiece = null;
+
     // Il pezzo si è appena separato nei suoi Puyo indipendenti: prima di
     // cercare eventuali gruppi, lasciamo che la gravità globale li faccia
     // assestare (es. il braccio di una "L" rimasto sospeso nel vuoto).
     await _settleWithGravity();
 
     var chainNumber = 0;
+
+    // Punti totalizzati da QUESTA catena (somma di tutti i suoi anelli),
+    // usati solo per decidere quanti Puyo spazzatura inviare all'avversario
+    // — non vanno confusi col punteggio mostrato a schermo, che include
+    // anche quello delle catene precedenti.
+    var nuisancePoints = 0;
 
     while (true) {
       final groups = _playfieldGrid.findGroupsToClear();
@@ -205,16 +317,23 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
       // catena come eventi distinti.
       await Future<void>.delayed(const Duration(milliseconds: 200));
 
+      // I Puyo spazzatura adiacenti a un gruppo che scoppia vengono
+      // liberati insieme a lui (non scoppiano mai da soli, vedi
+      // `findAdjacentGarbage`), ma non contano per il punteggio: solo i
+      // gruppi colorati (`groups`) entrano in `_scoreForLink`.
+      final garbageNeighbors = _playfieldGrid.findAdjacentGarbage(groups);
+
       // Aggiorniamo SUBITO lo stato logico (la pila non deve "aspettare"
       // la fine dell'animazione per considerarsi libera in quelle celle),
       // ma rimuoviamo i PuyoComponent solo dopo che l'effetto di scoppio
       // — animazione + particelle — è terminato: è questa attesa, non più
       // un semplice ritardo cieco, a riempire visivamente la pausa fra
       // uno scoppio della catena e il successivo.
-      final puyosToClear = [for (final group in groups) ...group];
+      final puyosToClear = [for (final group in groups) ...group, ...garbageNeighbors];
       for (final group in groups) {
         _playfieldGrid.clear(group);
       }
+      _playfieldGrid.clear(garbageNeighbors);
 
       await Future.wait([for (final puyo in puyosToClear) _playPopEffect(puyo)]);
 
@@ -222,7 +341,9 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
         puyo.removeFromParent();
       }
 
-      _addScore(_scoreForLink(chainNumber: chainNumber, groups: groups));
+      final linkScore = _scoreForLink(chainNumber: chainNumber, groups: groups);
+      _addScore(linkScore);
+      nuisancePoints += linkScore;
       _showChainPopup(chainNumber);
 
       // Attendiamo per intero la caduta animata generata da QUESTO
@@ -232,7 +353,15 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
       await _settleWithGravity();
     }
 
-    _spawnNewPiece();
+    // Più lunga la catena, più punti vale ogni suo anello (vedi
+    // `_chainPowerTable`): dividendo per una soglia fissa, una combo più
+    // lunga genera proporzionalmente più Puyo spazzatura per l'avversario.
+    final garbageToSend = nuisancePoints ~/ _nuisancePointsPerGarbage;
+    if (garbageToSend > 0) {
+      onSendGarbage?.call(garbageToSend);
+    }
+
+    await _spawnNewPiece();
   }
 
   /// Applica la gravità globale (`PlayfieldGrid.applyGravity`, che

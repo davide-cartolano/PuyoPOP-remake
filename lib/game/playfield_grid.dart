@@ -185,6 +185,56 @@ class PlayfieldGrid {
     return group;
   }
 
+  /// Trova, per ciascun gruppo che sta scoppiando, gli eventuali Puyo
+  /// spazzatura (`PuyoComponent.isGarbage`) adiacenti — sopra, sotto,
+  /// sinistra o destra — a uno qualunque dei suoi membri.
+  ///
+  /// È così che i Puyo spazzatura vengono "liberati" da uno scoppio senza
+  /// poter scoppiare da soli: non entrano mai in `findGroupsToClear`
+  /// (il loro colore non coincide con nessun colore di gioco, quindi il
+  /// flood fill non li raccoglie mai), ma chi orchestra la partita
+  /// (`PuyoGame`) li rimuove comunque insieme al gruppo a cui sono
+  /// attaccati.
+  List<PuyoComponent> findAdjacentGarbage(List<List<PuyoComponent>> groups) {
+    final seen = <PuyoComponent>{};
+    final garbageToClear = <PuyoComponent>[];
+
+    for (final group in groups) {
+      for (final puyo in group) {
+        for (final (deltaRow, deltaColumn) in _adjacentOffsets) {
+          final neighborRow = puyo.row + deltaRow;
+          final neighborColumn = puyo.column + deltaColumn;
+          if (!isInsideBounds(neighborColumn, neighborRow)) continue;
+
+          final neighbor = _cells[neighborRow][neighborColumn];
+          if (neighbor != null && neighbor.isGarbage && seen.add(neighbor)) {
+            garbageToClear.add(neighbor);
+          }
+        }
+      }
+    }
+
+    return garbageToClear;
+  }
+
+  /// Riga pivot in cui atterrerebbe un Puyo spazzatura lasciato cadere
+  /// nella colonna indicata: la prima cella libera subito sopra alla pila
+  /// già presente (o il fondo della griglia, se la colonna è vuota).
+  /// Restituisce `null` se la colonna è già piena fino in cima — in quel
+  /// caso quel singolo Puyo spazzatura va semplicemente scartato.
+  int? landingRowForGarbage(int column) {
+    var topOccupiedRow = GridComponent.rows;
+    for (var row = 0; row < GridComponent.rows; row++) {
+      if (_cells[row][column] != null) {
+        topOccupiedRow = row;
+        break;
+      }
+    }
+
+    final landingRow = topOccupiedRow - 1;
+    return landingRow < 0 ? null : landingRow;
+  }
+
   /// Rimuove dalla griglia LOGICA i Puyo del gruppo indicato: le loro
   /// celle tornano libere (`null`).
   ///
