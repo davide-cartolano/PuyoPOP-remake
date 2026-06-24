@@ -1,6 +1,6 @@
 import 'dart:math';
 
-import 'package:flame/components.dart' show Anchor, TextComponent, TextPaint;
+import 'package:flame/components.dart' show Anchor, PositionComponent, TextComponent, TextPaint;
 import 'package:flame/effects.dart';
 import 'package:flame/events.dart';
 import 'package:flame/game.dart';
@@ -27,6 +27,7 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
     required this.onGameOver,
     this.isAiControlled = false,
     this.onSendGarbage,
+    this.onPendingGarbageChanged,
   });
 
   /// Invocata quando la partita finisce (pila arrivata fino alla cella di
@@ -48,24 +49,61 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
   /// `null` nella modalità "Gioca da solo", dove non esiste un avversario.
   final void Function(int garbageCount)? onSendGarbage;
 
-  /// Quanti punti di una combo (la stessa formula di `_scoreForLink`)
-  /// servono per generare UN Puyo spazzatura da inviare all'avversario.
-  /// È lo stesso ordine di grandezza usato nel gioco originale: rende le
-  /// catene lunghe — che valgono esponenzialmente più punti, vedi
-  /// `_chainPowerTable` — sproporzionatamente più pericolose delle combo
-  /// singole, esattamente come ci si aspetta da un puzzle game competitivo.
-  static const int _nuisancePointsPerGarbage = 70;
+  /// Invocata ogni volta che cambia la quantità di Puyo spazzatura
+  /// accumulati CONTRO questa partita (`_pendingGarbage`): ricevuti da una
+  /// combo avversaria, compensati da una nostra combo, o fatti cadere.
+  /// `VersusScreen` la usa per mostrare il contatore sopra la griglia.
+  final void Function(int pendingGarbageCount)? onPendingGarbageChanged;
 
-  /// Puyo spazzatura ricevuti dall'avversario ma non ancora fatti cadere:
-  /// si accumulano qui finché il pezzo corrente non si blocca, e cadono
-  /// tutti insieme subito prima che ne nasca uno nuovo (vedi
-  /// `_dropPendingGarbage`) — mai a metà di una mossa del giocatore.
+  /// Quanti Puyo spazzatura genera una combo, in base alla sua lunghezza
+  /// (`chainNumber`, il numero di anelli/scoppi consecutivi avvenuti senza
+  /// che la griglia tornasse stabile fra l'uno e l'altro): una singola
+  /// esplosione senza combo ne genera 2, una combo da 2 ne genera 5, da 3
+  /// ne genera 8, da 4 ne genera 12 — poi continua a crescere di 4 per
+  /// ogni anello in più, in modo che le catene lunghe restino sempre
+  /// sproporzionatamente più pericolose delle combo corte, come nel gioco
+  /// originale.
+  static int _garbageCountForChain(int chainNumber) {
+    if (chainNumber <= 1) return 2;
+    if (chainNumber == 2) return 5;
+    if (chainNumber == 3) return 8;
+    return 12 + (chainNumber - 4) * 4;
+  }
+
+  /// Puyo spazzatura accumulati CONTRO questa partita: ricevuti da combo
+  /// avversarie ma non ancora fatti cadere. Cadono solo quando un pezzo si
+  /// blocca SENZA causare alcuno scoppio (vedi `_resolveBoardThenSpawnNext`)
+  /// — mai a metà di una mossa, e mai mentre siamo noi a far scoppiare
+  /// qualcosa. Una nostra combo, quando arriva, li riduce per prima cosa
+  /// (vedi `_sendGarbageForChain`) prima che l'eventuale eccedenza raggiunga
+  /// davvero l'avversario.
   int _pendingGarbage = 0;
+
+  void _setPendingGarbage(int value) {
+    _pendingGarbage = value;
+    onPendingGarbageChanged?.call(_pendingGarbage);
+  }
 
   /// Invocato da `VersusScreen` quando l'avversario fa una combo: accoda
   /// i Puyo spazzatura generati, che cadranno alla prossima occasione.
   void receiveGarbage(int count) {
-    _pendingGarbage += count;
+    _setPendingGarbage(_pendingGarbage + count);
+  }
+
+  /// Calcola quanti Puyo spazzatura genera una combo di lunghezza
+  /// `chainNumber` e li scarica prima su quelli già accumulati contro di
+  /// noi: solo l'eventuale eccedenza viene davvero inviata all'avversario
+  /// tramite `onSendGarbage`.
+  void _sendGarbageForChain(int chainNumber) {
+    final garbageGenerated = _garbageCountForChain(chainNumber);
+
+    final offset = min(garbageGenerated, _pendingGarbage);
+    _setPendingGarbage(_pendingGarbage - offset);
+
+    final garbageToSend = garbageGenerated - offset;
+    if (garbageToSend > 0) {
+      onSendGarbage?.call(garbageToSend);
+    }
   }
 
   /// Punteggio corrente, esposto in lettura per chi ospita il gioco (es.
@@ -113,6 +151,20 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
   /// Riquadro che mostra il prossimo pezzo, a lato della griglia.
   final NextPiecePreviewComponent _nextPiecePreview = NextPiecePreviewComponent();
 
+  /// Contenitore di TUTTO l'HUD (griglia, punteggio, anteprima): griglia e
+  /// sidebar vengono disposte al suo interno con coordinate FISSE (vedi
+  /// `_layoutHud`), e siamo NOI a scalare e centrare questo contenitore
+  /// per farlo entrare nello spazio realmente disponibile. Senza questo
+  /// livello in più, su uno schermo più piccolo della larghezza fissa di
+  /// griglia+sidebar (es. metà schermo di un telefono in modalità
+  /// "Gioca contro CPU") il contenuto sborderebbe oltre i propri confini,
+  /// invadendo visivamente l'area dell'altra partita.
+  final PositionComponent _hud = PositionComponent();
+
+  /// Spazio riservato, a destra della griglia, al punteggio e
+  /// all'anteprima del prossimo pezzo.
+  static const double _sidebarWidth = 160;
+
   /// Punteggio corrente della partita.
   int _score = 0;
 
@@ -140,10 +192,11 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
   Future<void> onLoad() async {
     super.onLoad();
 
-    await add(_grid);
-    await add(_scoreText);
-    await add(_nextPieceLabel);
-    await add(_nextPiecePreview);
+    await add(_hud);
+    await _hud.add(_grid);
+    await _hud.add(_scoreText);
+    await _hud.add(_nextPieceLabel);
+    await _hud.add(_nextPiecePreview);
     _layoutHud();
 
     _playfieldGrid = PlayfieldGrid();
@@ -157,7 +210,7 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
     // Avvio dello "spawn continuo": generiamo subito il primo pezzo. Ogni
     // pezzo, quando si blocca, chiamerà a sua volta `_spawnNewPiece` (è
     // la callback `onLocked` che gli passiamo), generando il successivo.
-    await _spawnNewPiece();
+    _spawnNewPiece();
   }
 
   @override
@@ -183,15 +236,7 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
   /// (colonna centrale, riga più in alto) sia libera: se la pila di Puyo
   /// bloccati è arrivata fin lì, non c'è più spazio per un nuovo pezzo —
   /// è la condizione classica di "game over" nei puzzle game ad incastro.
-  Future<void> _spawnNewPiece() async {
-    // I Puyo spazzatura ricevuti dall'avversario cadono ORA, prima di
-    // generare il pezzo successivo: mai a metà di una mossa del
-    // giocatore. Possono anche, da soli, riempire la cella di spawn — è
-    // la combo dell'avversario, a quel punto, a causare il game over.
-    if (_pendingGarbage > 0) {
-      await _dropPendingGarbage();
-    }
-
+  void _spawnNewPiece() {
     final spawnCellIsFree = _playfieldGrid.isFree(FallingPiece.spawnColumn, 0);
     if (!spawnCellIsFree) {
       _triggerGameOver();
@@ -225,7 +270,7 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
   /// finché non ne restano più o la griglia non ha più spazio.
   Future<void> _dropPendingGarbage() async {
     var remaining = _pendingGarbage;
-    _pendingGarbage = 0;
+    _setPendingGarbage(0);
 
     while (remaining > 0) {
       final shuffledColumns = List.generate(GridComponent.columns, (column) => column)..shuffle(_random);
@@ -296,12 +341,6 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
 
     var chainNumber = 0;
 
-    // Punti totalizzati da QUESTA catena (somma di tutti i suoi anelli),
-    // usati solo per decidere quanti Puyo spazzatura inviare all'avversario
-    // — non vanno confusi col punteggio mostrato a schermo, che include
-    // anche quello delle catene precedenti.
-    var nuisancePoints = 0;
-
     while (true) {
       final groups = _playfieldGrid.findGroupsToClear();
       if (groups.isEmpty) {
@@ -309,7 +348,13 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
         break;
       }
 
-      chainNumber++;
+      // Ogni gruppo che scoppia in questo stesso anello (gruppi di colori
+      // diversi separati, scoppiati simultaneamente dopo l'ultima caduta
+      // per gravità) vale un punto di combo a sé, non solo l'anello nel
+      // suo insieme: 5 verdi + 5 rossi insieme, alla prima occasione, è
+      // già una combo di 2 — non di 1 — esattamente come un secondo
+      // anello di catena lo sarebbe.
+      chainNumber += groups.length;
 
       // Breve pausa "di lettura": il giocatore vede per un istante il
       // gruppo appena formatosi prima che scompaia, invece di un taglio
@@ -341,9 +386,7 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
         puyo.removeFromParent();
       }
 
-      final linkScore = _scoreForLink(chainNumber: chainNumber, groups: groups);
-      _addScore(linkScore);
-      nuisancePoints += linkScore;
+      _addScore(_scoreForLink(chainNumber: chainNumber, groups: groups));
       _showChainPopup(chainNumber);
 
       // Attendiamo per intero la caduta animata generata da QUESTO
@@ -353,15 +396,20 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
       await _settleWithGravity();
     }
 
-    // Più lunga la catena, più punti vale ogni suo anello (vedi
-    // `_chainPowerTable`): dividendo per una soglia fissa, una combo più
-    // lunga genera proporzionalmente più Puyo spazzatura per l'avversario.
-    final garbageToSend = nuisancePoints ~/ _nuisancePointsPerGarbage;
-    if (garbageToSend > 0) {
-      onSendGarbage?.call(garbageToSend);
+    if (chainNumber > 0) {
+      // Abbiamo fatto scoppiare qualcosa: generiamo Puyo spazzatura per
+      // l'avversario (in base alla lunghezza della catena) e NON facciamo
+      // cadere quelli eventualmente accumulati contro di noi — restano in
+      // sospeso fino a una nostra mossa "a vuoto".
+      _sendGarbageForChain(chainNumber);
+    } else if (_pendingGarbage > 0) {
+      // Questo pezzo si è bloccato senza causare alcuno scoppio: è
+      // esattamente — e SOLO — in questo momento che la spazzatura
+      // accumulata contro di noi cade davvero, prima del prossimo pezzo.
+      await _dropPendingGarbage();
     }
 
-    await _spawnNewPiece();
+    _spawnNewPiece();
   }
 
   /// Applica la gravità globale (`PlayfieldGrid.applyGravity`, che
@@ -423,7 +471,11 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
     );
     popup.add(RemoveEffect(delay: 0.7));
 
-    add(popup);
+    // Aggiunto a `_hud` (non alla radice del gioco): `_grid.position` è
+    // espresso nelle coordinate FISSE e non scalate dell'HUD (vedi
+    // `_layoutHud`), quindi il popup deve vivere nello stesso sistema di
+    // coordinate per comparire davvero al centro della griglia.
+    _hud.add(popup);
   }
 
   /// Tabella del "chain power" del gioco originale: il moltiplicatore
@@ -503,32 +555,56 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
     _layoutHud();
   }
 
-  /// Dispone gli elementi dell'interfaccia di gioco: la griglia al
-  /// centro dello schermo, e il punteggio appena alla sua destra, alla
-  /// stessa altezza del bordo superiore — "a lato della griglia", come
-  /// richiesto.
+  /// Dispone gli elementi dell'interfaccia di gioco (griglia a sinistra,
+  /// punteggio e anteprima del prossimo pezzo a destra) in coordinate
+  /// FISSE — esattamente come se lo schermo avesse sempre la stessa
+  /// dimensione — e poi scala e centra l'intero `_hud` per farlo entrare
+  /// nello spazio realmente disponibile (`size`).
+  ///
+  /// Questo secondo passaggio è ciò che permette al gioco di adattarsi a
+  /// QUALUNQUE area assegnata dal layout Flutter che lo ospita: una
+  /// finestra desktop, una pagina web, ma anche solo MEZZO schermo di un
+  /// telefono come nella modalità "Gioca contro CPU" — senza la scala,
+  /// griglia e sidebar (disegnate a dimensione fissa in pixel) potrebbero
+  /// risultare più larghe dello spazio disponibile e sborderebbero
+  /// nell'area della partita vicina.
   void _layoutHud() {
-    // Essendo `_grid` ancorata al centro (Anchor.center), basta impostarne
-    // la posizione al centro esatto dell'area di gioco (`size / 2`)
-    // perché risulti perfettamente centrata sullo schermo.
-    _grid.position = size / 2;
-
-    final gridHalfSize = Vector2(
+    final gridSize = Vector2(
       GridComponent.columns * GridComponent.cellSize,
       GridComponent.rows * GridComponent.cellSize,
-    ) / 2;
+    );
 
-    // mettiamo subito a destra del bordo destro della griglia
-    // (`gridHalfSize.x` oltre al centro), allineato al suo bordo superiore.
-    final sidebarX = _grid.position.x + gridHalfSize.x + 24;
-    final sidebarTop = _grid.position.y - gridHalfSize.y;
+    final contentSize = Vector2(gridSize.x + _sidebarWidth, gridSize.y);
+
+    // Essendo `_grid` ancorata al centro (Anchor.center), per metterla
+    // nell'angolo in alto a sinistra del contenuto basta posizionarla a
+    // metà della propria dimensione.
+    _grid.position = gridSize / 2;
+
+    // Sidebar (punteggio + anteprima) subito a destra del bordo destro
+    // della griglia, allineata al suo bordo superiore.
+    const sidebarX = GridComponent.columns * GridComponent.cellSize + 24;
+    const sidebarTop = 0.0;
 
     _scoreText.position = Vector2(sidebarX, sidebarTop);
-
-    // Etichetta e anteprima del prossimo pezzo, impilate subito sotto al
-    // punteggio nella stessa colonna laterale.
     _nextPieceLabel.position = Vector2(sidebarX, sidebarTop + 48);
     _nextPiecePreview.position = Vector2(sidebarX, sidebarTop + 80);
+
+    // Scala uniforme (stessa per X e Y, altrimenti la griglia risulterebbe
+    // deformata) che fa entrare l'intero contenuto, a dimensione fissa,
+    // nello spazio davvero disponibile — sia che sia più piccolo (lo
+    // riduce) sia che sia più grande (lo amplia, evitando un riquadro di
+    // gioco minuscolo su un monitor desktop ampio).
+    if (contentSize.x <= 0 || contentSize.y <= 0 || size.x <= 0 || size.y <= 0) {
+      return;
+    }
+
+    final scale = min(size.x / contentSize.x, size.y / contentSize.y);
+    _hud.scale = Vector2.all(scale);
+
+    // Centra il contenuto SCALATO nello spazio disponibile.
+    final scaledContentSize = contentSize * scale;
+    _hud.position = (size - scaledContentSize) / 2;
   }
 }
 

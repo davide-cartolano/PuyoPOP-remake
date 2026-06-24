@@ -72,6 +72,21 @@ class _GameScreenState extends State<GameScreen> {
   /// percorrere l'intera larghezza della griglia per un solo passo.
   static const double _dragStepThreshold = 32;
 
+  /// Spostamento verticale TOTALE del dito dall'inizio del gesto corrente
+  /// (somma di tutti i `delta.dy`, non solo l'ultimo). A differenza dello
+  /// spostamento orizzontale — che scatta a "passi" discreti — la caduta
+  /// accelerata è un interruttore continuo: usare il solo `delta` dell'ultimo
+  /// frame lo accenderebbe per qualunque micro-movimento positivo, incluso
+  /// il jitter naturale di un dito fermo o un trascinamento puramente
+  /// laterale. Confrontando invece la posizione TOTALE con una soglia,
+  /// l'interruttore si accende solo dopo un vero trascinamento verso il
+  /// basso, e si spegne se il dito risale sopra la soglia.
+  double _dragTotalY = 0;
+
+  /// Quanti pixel logici di trascinamento verso il basso, dall'inizio del
+  /// gesto, servono per attivare la caduta accelerata.
+  static const double _softDropEngageThreshold = 24;
+
   void _onPanUpdate(DragUpdateDetails details) {
     _dragAccumulatorX += details.delta.dx;
     while (_dragAccumulatorX > _dragStepThreshold) {
@@ -83,21 +98,19 @@ class _GameScreenState extends State<GameScreen> {
       _dragAccumulatorX += _dragStepThreshold;
     }
 
-    // Un trascinamento verso il basso attiva la caduta accelerata, esattamente
-    // come tenere premuta la freccia Giù da tastiera — resta attiva finché il
-    // dito non si alza (`_onPanEnd`/`_onPanCancel`).
-    if (details.delta.dy > 0) {
-      _game.setCurrentPieceSoftDropping(true);
-    }
+    _dragTotalY += details.delta.dy;
+    _game.setCurrentPieceSoftDropping(_dragTotalY > _softDropEngageThreshold);
   }
 
   void _onPanEnd(DragEndDetails details) {
     _dragAccumulatorX = 0;
+    _dragTotalY = 0;
     _game.setCurrentPieceSoftDropping(false);
   }
 
   void _onPanCancel() {
     _dragAccumulatorX = 0;
+    _dragTotalY = 0;
     _game.setCurrentPieceSoftDropping(false);
   }
 

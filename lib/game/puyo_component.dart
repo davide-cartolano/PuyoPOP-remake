@@ -159,10 +159,11 @@ class PuyoComponent extends PositionComponent {
     final center = Offset(size.x / 2, size.y / 2);
 
     if (isGarbage) {
-      // I Puyo spazzatura non hanno un viso: sono un semplice "macigno"
-      // bianco, visivamente distinto a colpo d'occhio dai Puyo colorati
-      // con cui il giocatore deve invece formare gruppi.
-      paintGarbagePuyo(canvas, center: center, radius: radius);
+      // I Puyo spazzatura hanno lo stesso viso (e battito di ciglia) dei
+      // Puyo colorati, ma un corpo bianco leggermente trasparente: basta
+      // a renderli distinguibili a colpo d'occhio senza farli sembrare
+      // un elemento completamente estraneo al resto del gioco.
+      paintGarbagePuyo(canvas, center: center, radius: radius, eyesClosed: _blinkTimeRemaining > 0);
       return;
     }
 
@@ -215,26 +216,35 @@ class PuyoComponent extends PositionComponent {
   }
 }
 
-/// Disegna un Puyo spazzatura: una sfera grigio chiaro/bianca, lucida come
-/// un Puyo normale ma senza viso — è il "macigno" che il gioco originale
-/// fa cadere sull'avversario dopo una combo, e che non scoppia mai da
-/// solo (vedi `PuyoComponent.isGarbage`).
-void paintGarbagePuyo(Canvas canvas, {required Offset center, required double radius}) {
-  const garbageColor = Color(0xFFE8E8F0);
+/// Disegna un Puyo spazzatura: una sfera bianca lucida come un Puyo
+/// normale, con lo stesso viso (occhi + battito di ciglia), ma
+/// leggermente trasparente — è il "macigno" che il gioco originale fa
+/// cadere sull'avversario dopo una combo, e che non scoppia mai da solo
+/// (vedi `PuyoComponent.isGarbage`). La trasparenza è ciò che lo
+/// distingue a colpo d'occhio dai Puyo colorati, pur restando coerente
+/// visivamente con loro.
+void paintGarbagePuyo(Canvas canvas, {required Offset center, required double radius, bool eyesClosed = false}) {
+  const garbageColor = Color(0xFFFAFAFF);
+  const opacity = 0.7;
 
   final bodyPaint = Paint()
     ..shader = Gradient.radial(
       center.translate(-radius * 0.35, -radius * 0.35),
       radius * 1.4,
-      [const Color(0xFFFFFFFF), garbageColor],
+      [
+        const Color(0xFFFFFFFF).withValues(alpha: opacity),
+        garbageColor.withValues(alpha: opacity),
+      ],
     );
   canvas.drawCircle(center, radius, bodyPaint);
 
   final outlinePaint = Paint()
     ..style = PaintingStyle.stroke
     ..strokeWidth = 1.5
-    ..color = _darken(garbageColor, 0.35);
+    ..color = const Color(0xFFD0D0DC).withValues(alpha: opacity);
   canvas.drawCircle(center, radius, outlinePaint);
+
+  _renderFace(canvas, center, radius, eyesClosed);
 }
 
 /// Disegna un Puyo (corpo lucido + viso) centrato in `center`, con il
