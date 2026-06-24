@@ -1,9 +1,10 @@
 import 'dart:async';
-import 'dart:math' show pi;
+import 'dart:math' show Random, cos, pi, sin;
 import 'dart:ui';
 
 import 'package:flame/components.dart';
 import 'package:flame/effects.dart';
+import 'package:flame/particles.dart';
 
 import 'grid_component.dart';
 
@@ -32,6 +33,21 @@ class PuyoComponent extends PositionComponent {
   /// possono "scoppiare" insieme.
   final Color color;
 
+  /// Sorgente di casualità per il battito di ciglia (vedi sotto): è
+  /// un'istanza per Puyo, così ognuno sbatte le palpebre con un proprio
+  /// ritmo indipendente, invece che tutti all'unisono.
+  final Random _random = Random();
+
+  /// Quanto manca (in secondi) al prossimo battito di ciglia.
+  double _timeUntilNextBlink = 0;
+
+  /// Quanto manca (in secondi) alla fine del battito di ciglia in corso;
+  /// quando è positivo, gli occhi vengono disegnati chiusi.
+  double _blinkTimeRemaining = 0;
+
+  /// Durata di un singolo battito di ciglia.
+  static const double _blinkDuration = 0.12;
+
   PuyoComponent({
     required this.column,
     required this.row,
@@ -46,6 +62,29 @@ class PuyoComponent extends PositionComponent {
           anchor: Anchor.topLeft,
         ) {
     moveTo(column, row);
+    _timeUntilNextBlink = _randomBlinkInterval();
+  }
+
+  /// Intervallo casuale, in secondi, fino al prossimo battito di ciglia:
+  /// senza questa variazione tutti i Puyo sbatterebbero le palpebre
+  /// esattamente nello stesso istante, un effetto meccanico che la
+  /// casualità per-istanza evita.
+  double _randomBlinkInterval() => 1.5 + _random.nextDouble() * 3.5;
+
+  @override
+  void update(double dt) {
+    super.update(dt);
+
+    if (_blinkTimeRemaining > 0) {
+      _blinkTimeRemaining -= dt;
+      return;
+    }
+
+    _timeUntilNextBlink -= dt;
+    if (_timeUntilNextBlink <= 0) {
+      _blinkTimeRemaining = _blinkDuration;
+      _timeUntilNextBlink = _randomBlinkInterval();
+    }
   }
 
   /// Sposta questo Puyo in una nuova cella della griglia, ricalcolando
@@ -109,7 +148,52 @@ class PuyoComponent extends PositionComponent {
     final radius = (size.x - padding * 2) / 2;
     final center = Offset(size.x / 2, size.y / 2);
 
-    paintPuyo(canvas, center: center, radius: radius, color: color);
+    paintPuyo(canvas, center: center, radius: radius, color: color, eyesClosed: _blinkTimeRemaining > 0);
+  }
+
+  /// Anima lo "scoppio" di questo Puyo quando fa parte di un gruppo che
+  /// viene eliminato: un breve rigonfiamento seguito da un collasso a
+  /// dimensione zero, invece della scomparsa istantanea che si aveva
+  /// prima. Il `Future` restituito si completa a fine animazione — è
+  /// quello che permette a `PuyoGame` di attendere l'effetto prima di
+  /// rimuovere davvero il componente dall'albero.
+  Future<void> playPopEffect() {
+    final completer = Completer<void>();
+
+    // L'ancoraggio normale (Anchor.topLeft) è comodo per allinearsi alla
+    // griglia, ma scalerebbe il Puyo a partire dal suo angolo in alto a
+    // sinistra invece che dal centro. Passiamo qui all'ancoraggio
+    // centrale, ricalcolando `position` per non far "saltare" visivamente
+    // il componente: dato che si tratta dell'ultimo istante di vita del
+    // Puyo (verrà rimosso a fine animazione), non serve riportarlo indietro.
+    position = position + size / 2;
+    anchor = Anchor.center;
+
+    add(
+      SequenceEffect(
+        [
+          ScaleEffect.to(Vector2.all(1.3), EffectController(duration: 0.08)),
+          ScaleEffect.to(Vector2.zero(), EffectController(duration: 0.14)),
+        ],
+        onComplete: completer.complete,
+      ),
+    );
+    return completer.future;
+  }
+
+  /// Anima un breve "schiacciamento elastico" quando il pezzo tocca terra
+  /// e si blocca: prima si appiattisce (largo e basso), poi rimbalza in
+  /// senso opposto (stretto e alto), infine torna alla scala normale. Non
+  /// serve attendere il completamento — è solo un tocco cosmetico — quindi
+  /// a differenza di `playPopEffect` questo metodo non espone un Future.
+  void playLandSquashEffect() {
+    add(
+      SequenceEffect([
+        ScaleEffect.to(Vector2(1.18, 0.78), EffectController(duration: 0.07)),
+        ScaleEffect.to(Vector2(0.92, 1.1), EffectController(duration: 0.08)),
+        ScaleEffect.to(Vector2.all(1), EffectController(duration: 0.08)),
+      ]),
+    );
   }
 }
 
@@ -118,7 +202,13 @@ class PuyoComponent extends PositionComponent {
 /// `PuyoComponent`, proprio per poter essere riusata anche da
 /// `NextPiecePreviewComponent`, che deve disegnare la stessa identica
 /// faccina ma più piccola e senza essere un Puyo "vero" della griglia.
-void paintPuyo(Canvas canvas, {required Offset center, required double radius, required Color color}) {
+void paintPuyo(
+  Canvas canvas, {
+  required Offset center,
+  required double radius,
+  required Color color,
+  bool eyesClosed = false,
+}) {
   // Corpo: un gradiente radiale (più chiaro verso l'alto a sinistra)
   // simula una piccola fonte di luce e dà al cerchio l'aspetto lucido e
   // "gommoso" tipico dei Puyo, invece di un semplice riempimento piatto.
@@ -136,31 +226,49 @@ void paintPuyo(Canvas canvas, {required Offset center, required double radius, r
     ..color = _darken(color, 0.35);
   canvas.drawCircle(center, radius, outlinePaint);
 
-  _renderFace(canvas, center, radius);
+  _renderFace(canvas, center, radius, eyesClosed);
 }
 
-/// Disegna gli occhi (bianchi con pupilla e riflesso) e la boccuccia: è
-/// questo dettaglio del viso, più del colore, a rendere ogni Puyo
-/// riconoscibile come un personaggio e non solo come una pallina colorata.
-void _renderFace(Canvas canvas, Offset bodyCenter, double bodyRadius) {
+/// Disegna gli occhi (bianchi con pupilla e riflesso, o un trattino se
+/// `eyesClosed` — il battito di ciglia) e la boccuccia: è questo
+/// dettaglio del viso, più del colore, a rendere ogni Puyo riconoscibile
+/// come un personaggio e non solo come una pallina colorata.
+void _renderFace(Canvas canvas, Offset bodyCenter, double bodyRadius, bool eyesClosed) {
   final eyeOffset = Offset(bodyRadius * 0.38, -bodyRadius * 0.05);
   final eyeRadius = bodyRadius * 0.34;
   final pupilRadius = eyeRadius * 0.48;
 
-  final eyeWhitePaint = Paint()..color = const Color(0xFFFFFFFF);
-  final pupilPaint = Paint()..color = const Color(0xFF1B1B2F);
-  final shinePaint = Paint()..color = const Color(0xFFFFFFFF);
+  if (eyesClosed) {
+    final closedEyePaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = bodyRadius * 0.12
+      ..strokeCap = StrokeCap.round
+      ..color = const Color(0xFF1B1B2F);
 
-  for (final side in [-1, 1]) {
-    final eyeCenter = bodyCenter.translate(eyeOffset.dx * side, eyeOffset.dy);
+    for (final side in [-1, 1]) {
+      final eyeCenter = bodyCenter.translate(eyeOffset.dx * side, eyeOffset.dy);
+      canvas.drawLine(
+        eyeCenter.translate(-eyeRadius * 0.7, 0),
+        eyeCenter.translate(eyeRadius * 0.7, 0),
+        closedEyePaint,
+      );
+    }
+  } else {
+    final eyeWhitePaint = Paint()..color = const Color(0xFFFFFFFF);
+    final pupilPaint = Paint()..color = const Color(0xFF1B1B2F);
+    final shinePaint = Paint()..color = const Color(0xFFFFFFFF);
 
-    canvas.drawCircle(eyeCenter, eyeRadius, eyeWhitePaint);
+    for (final side in [-1, 1]) {
+      final eyeCenter = bodyCenter.translate(eyeOffset.dx * side, eyeOffset.dy);
 
-    final pupilCenter = eyeCenter.translate(0, eyeRadius * 0.1);
-    canvas.drawCircle(pupilCenter, pupilRadius, pupilPaint);
+      canvas.drawCircle(eyeCenter, eyeRadius, eyeWhitePaint);
 
-    final shineCenter = pupilCenter.translate(-pupilRadius * 0.35, -pupilRadius * 0.35);
-    canvas.drawCircle(shineCenter, pupilRadius * 0.35, shinePaint);
+      final pupilCenter = eyeCenter.translate(0, eyeRadius * 0.1);
+      canvas.drawCircle(pupilCenter, pupilRadius, pupilPaint);
+
+      final shineCenter = pupilCenter.translate(-pupilRadius * 0.35, -pupilRadius * 0.35);
+      canvas.drawCircle(shineCenter, pupilRadius * 0.35, shinePaint);
+    }
   }
 
   // Boccuccia: un semplice arco a "v" rovesciata sotto gli occhi.
@@ -178,6 +286,54 @@ void _renderFace(Canvas canvas, Offset bodyCenter, double bodyRadius) {
   canvas.drawArc(mouthRect, 0.15 * pi, pi - 0.3 * pi, false, mouthPaint);
 }
 
+/// Disegna la "controfigura" semitrasparente di un Puyo, usata per
+/// mostrare in anteprima dove atterrerebbe il pezzo se lo si lasciasse
+/// cadere da subito (il "ghost piece" dei puzzle game ad incastro). A
+/// differenza di `paintPuyo`, niente gradiente né viso: solo un disco e
+/// un contorno tenui, per non confondersi visivamente con i Puyo veri.
+void paintPuyoGhost(Canvas canvas, {required Offset center, required double radius, required Color color}) {
+  final fillPaint = Paint()..color = color.withAlpha(50);
+  canvas.drawCircle(center, radius, fillPaint);
+
+  final outlinePaint = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 1.5
+    ..color = color.withAlpha(160);
+  canvas.drawCircle(center, radius, outlinePaint);
+}
+
 Color _lighten(Color base, double amount) => Color.lerp(base, const Color(0xFFFFFFFF), amount)!;
 
 Color _darken(Color base, double amount) => Color.lerp(base, const Color(0xFF000000), amount)!;
+
+/// Numero di particelle generate da ogni scoppio: un compromesso fra un
+/// effetto ben visibile e il costo di disegnarle tutte.
+const _burstParticleCount = 10;
+
+/// Crea un piccolo "scoppio" di particelle colorate centrato su
+/// `position`, da accompagnare alla scomparsa di un Puyo. Ogni particella
+/// parte in una direzione diversa (distribuite a raggiera) con una
+/// leggera accelerazione verso il basso, per dare un minimo di peso
+/// fisico all'esplosione invece di un'espansione perfettamente uniforme.
+///
+/// Restituisce un `ParticleSystemComponent` già pronto da aggiungere al
+/// gioco: si rimuove da solo (vedi `Particle`/`ParticleSystemComponent` di
+/// Flame) una volta esaurita la propria `lifespan`, senza bisogno che
+/// `PuyoGame` se ne occupi.
+ParticleSystemComponent createPuyoBurst({required Vector2 position, required Color color}) {
+  final particle = Particle.generate(
+    count: _burstParticleCount,
+    lifespan: 0.4,
+    generator: (index) {
+      final angle = (index / _burstParticleCount) * 2 * pi;
+      final speed = Vector2(cos(angle), sin(angle)) * 90;
+      return AcceleratedParticle(
+        speed: speed,
+        acceleration: Vector2(0, 160),
+        child: CircleParticle(radius: 3, paint: Paint()..color = color),
+      );
+    },
+  );
+
+  return ParticleSystemComponent(position: position, particle: particle);
+}

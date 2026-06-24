@@ -1,3 +1,5 @@
+import 'package:flutter/material.dart' show Color;
+
 import 'grid_component.dart';
 import 'puyo_component.dart';
 
@@ -43,6 +45,27 @@ class PlayfieldGrid {
   /// contiene il PuyoComponent ormai fermo che occupa quella cella.
   final List<List<PuyoComponent?>> _cells;
 
+  /// Quante righe, partendo dall'alto, fanno scattare l'indicatore di
+  /// pericolo (`isStackInDanger`) non appena vi compare un Puyo: un
+  /// margine di preavviso prima che la pila raggiunga davvero la cella
+  /// di spawn e causi il game over.
+  static const int dangerRowCount = 3;
+
+  /// Vero se la pila è arrivata abbastanza in alto da meritare un avviso:
+  /// almeno una cella occupata in una delle `dangerRowCount` righe più in
+  /// alto della griglia. `PuyoGame` lo controlla ad ogni frame per
+  /// decidere se far lampeggiare quelle righe.
+  bool isStackInDanger() {
+    for (var row = 0; row < dangerRowCount; row++) {
+      for (var column = 0; column < GridComponent.columns; column++) {
+        if (_cells[row][column] != null) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   /// Vero se (column, row) ricade dentro ai confini della griglia.
   bool isInsideBounds(int column, int row) {
     return column >= 0 &&
@@ -60,6 +83,14 @@ class PlayfieldGrid {
   /// o rotazione.
   bool isFree(int column, int row) {
     return isInsideBounds(column, row) && _cells[row][column] == null;
+  }
+
+  /// Colore del Puyo bloccato in (column, row), o `null` se la cella è
+  /// libera o fuori dai confini. Usato dall'AI (vedi `puyo_ai.dart`) per
+  /// valutare quanto una mossa accosti colori uguali.
+  Color? colorAt(int column, int row) {
+    if (!isInsideBounds(column, row)) return null;
+    return _cells[row][column]?.color;
   }
 
   /// Registra un Puyo come "bloccato" nella sua cella corrente

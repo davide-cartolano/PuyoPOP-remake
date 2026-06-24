@@ -1,32 +1,44 @@
 import 'dart:math';
 
-import 'package:flame/components.dart' show TextComponent, TextPaint;
+import 'package:flame/components.dart' show Anchor, TextComponent, TextPaint;
+import 'package:flame/effects.dart';
 import 'package:flame/events.dart';
 import 'package:flame/game.dart';
 import 'package:flutter/foundation.dart' show VoidCallback;
-import 'package:flutter/material.dart' show Colors, TextStyle;
+import 'package:flutter/material.dart' show Colors, FontWeight, TextStyle;
 
+import 'ai_controller.dart';
 import 'falling_piece.dart';
 import 'grid_component.dart';
 import 'next_piece_preview.dart';
 import 'piece_shapes.dart';
 import 'playfield_grid.dart';
+import 'puyo_component.dart';
 
-/// Classe principale del gioco. Estendere FlameGame ci dà accesso al
-/// game loop di Flame (update/render automatici), al sistema di componenti
+/// Classe principale del gi oco. Estendere FlameGame ci dà accesso al
+/// game loop di Flame (update/re nder automatici), al sistema di componenti
 /// e alla gestione delle dimensioni dello schermo.
 /// Il mixin `HasKeyboardHandlerComponents` dice a Flame: "questo gioco
 /// riceve eventi da tastiera e deve inoltrarli ai componenti figli che
 /// implementano `KeyboardHandler`" (come il nostro FallingPiece).
 /// Senza questo mixin, gli eventi tastiera non arriverebbero ai componenti.
 class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
-  PuyoGame({required this.onGameOver});
+  PuyoGame({required this.onGameOver, this.isAiControlled = false});
 
   /// Invocata quando la partita finisce (pila arrivata fino alla cella di
   /// spawn). `PuyoGame` è puro Flame/Dart e non ha un `BuildContext`: è
   /// `GameScreen` — che lo possiede — a passarci questa callback, e a
   /// occuparsi di mostrare il messaggio a schermo e tornare al menu.
   final VoidCallback onGameOver;
+
+  /// Se vero, ogni pezzo generato viene pilotato da `AiController` invece
+  /// che dalla tastiera — è ciò che distingue la griglia della CPU da
+  /// quella del giocatore umano nella modalità "Gioca contro CPU".
+  final bool isAiControlled;
+
+  /// Punteggio corrente, esposto in lettura per chi ospita il gioco (es.
+  /// `VersusScreen`, che lo usa per stabilire chi ha vinto la partita).
+  int get score => _score;
 
   // Creiamo subito l'istanza (non in onLoad): Flame può chiamare
   // onGameResize prima che onLoad termini, e a quel punto questo campo
@@ -101,6 +113,18 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
     _spawnNewPiece();
   }
 
+  @override
+  void update(double dt) {
+    super.update(dt);
+
+    // Controllato qui, ad ogni frame, invece che solo nei punti in cui la
+    // pila cambia (scoppi, gravità, lock): è la via più semplice per
+    // tenere l'indicatore di pericolo sempre sincronizzato con lo stato
+    // reale della griglia, senza dover individuare ogni singolo punto del
+    // codice che potrebbe alterare l'altezza della pila.
+    _grid.isInDanger = _playfieldGrid.isStackInDanger();
+  }
+
   /// Crea un nuovo pezzo controllabile (`FallingPiece`) e lo aggiunge al
   /// gioco come FIGLIO della griglia — esattamente come facevamo con il
   /// PuyoComponent dello step precedente: in questo modo eredita il
@@ -127,13 +151,16 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
     _nextSpec = generatePieceSpec(_random);
     _nextPiecePreview.updatePiece(_nextSpec);
 
-    _grid.add(
-      FallingPiece(
-        playfieldGrid: _playfieldGrid,
-        onLocked: _resolveBoardThenSpawnNext,
-        spec: spec,
-      ),
+    final piece = FallingPiece(
+      playfieldGrid: _playfieldGrid,
+      onLocked: _resolveBoardThenSpawnNext,
+      spec: spec,
     );
+    _grid.add(piece);
+
+    if (isAiControlled) {
+      _grid.add(AiController(piece: piece, playfieldGrid: _playfieldGrid));
+    }
   }
 
   /// Risolve la griglia dopo che un pezzo si è bloccato e separato nei
@@ -178,14 +205,25 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
       // catena come eventi distinti.
       await Future<void>.delayed(const Duration(milliseconds: 200));
 
+      // Aggiorniamo SUBITO lo stato logico (la pila non deve "aspettare"
+      // la fine dell'animazione per considerarsi libera in quelle celle),
+      // ma rimuoviamo i PuyoComponent solo dopo che l'effetto di scoppio
+      // — animazione + particelle — è terminato: è questa attesa, non più
+      // un semplice ritardo cieco, a riempire visivamente la pausa fra
+      // uno scoppio della catena e il successivo.
+      final puyosToClear = [for (final group in groups) ...group];
       for (final group in groups) {
         _playfieldGrid.clear(group);
-        for (final puyo in group) {
-          puyo.removeFromParent();
-        }
       }
 
-      _addScore(_scoreForChain(chainNumber));
+      await Future.wait([for (final puyo in puyosToClear) _playPopEffect(puyo)]);
+
+      for (final puyo in puyosToClear) {
+        puyo.removeFromParent();
+      }
+
+      _addScore(_scoreForLink(chainNumber: chainNumber, groups: groups));
+      _showChainPopup(chainNumber);
 
       // Attendiamo per intero la caduta animata generata da QUESTO
       // scoppio prima di tornare in cima al ciclo: è esattamente questa
@@ -214,12 +252,96 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
     ]);
   }
 
-  /// Punti assegnati per uno scoppio alla concatenazione (chain) numero
-  /// `chainNumber`, secondo la progressione richiesta — i numeri
-  /// triangolari 1, 3, 6, 10, ... ottenuti dalla formula `n*(n+1)/2`:
-  /// ogni anello in più della catena vale proporzionalmente di più,
-  /// premiando le combo lunghe assai più che la somma dei singoli scoppi.
-  int _scoreForChain(int chainNumber) => (chainNumber * (chainNumber + 1)) ~/ 2;
+  /// Anima lo scoppio di un singolo Puyo: lo fa "rigonfiare e collassare"
+  /// (`PuyoComponent.playPopEffect`) e, in contemporanea, genera dalla sua
+  /// posizione un piccolo burst di particelle dello stesso colore
+  /// (`createPuyoBurst`). Il Future si completa solo quando l'animazione
+  /// del Puyo è finita: è quello che `_resolveBoardThenSpawnNext` attende
+  /// prima di rimuoverlo davvero dall'albero.
+  Future<void> _playPopEffect(PuyoComponent puyo) {
+    final burstCenter = puyo.position + puyo.size / 2;
+    _grid.add(createPuyoBurst(position: burstCenter, color: puyo.color));
+    return puyo.playPopEffect();
+  }
+
+  /// Mostra, al centro della griglia, un breve testo "Chain xN!" quando
+  /// uno scoppio fa parte di una catena (`chainNumber` >= 2) — il primo
+  /// scoppio di ogni caduta non è ancora una "combo", quindi non genera
+  /// alcun popup. Il testo nasce piccolo, "scatta" alla sua dimensione
+  /// piena, fluttua verso l'alto e si rimuove da solo a fine animazione.
+  void _showChainPopup(int chainNumber) {
+    if (chainNumber < 2) return;
+
+    final popup = TextComponent(
+      text: 'Chain x$chainNumber!',
+      textRenderer: TextPaint(
+        style: const TextStyle(
+          color: Colors.amber,
+          fontSize: 28,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      position: _grid.position.clone(),
+      anchor: Anchor.center,
+      scale: Vector2.zero(),
+    );
+
+    popup.add(
+      ScaleEffect.to(Vector2.all(1), EffectController(duration: 0.15)),
+    );
+    popup.add(
+      MoveByEffect(Vector2(0, -36), EffectController(duration: 0.7)),
+    );
+    popup.add(RemoveEffect(delay: 0.7));
+
+    add(popup);
+  }
+
+  /// Tabella del "chain power" del gioco originale: il moltiplicatore
+  /// cresce con l'anello della catena (`chainNumber`), ma non
+  /// linearmente — ogni anello in più vale proporzionalmente di più dei
+  /// precedenti, fino ad appiattirsi oltre la dodicesima concatenazione.
+  /// Indice 0 = primo anello (nessun bonus: non è ancora una "catena").
+  static const List<int> _chainPowerTable = [
+    0, 8, 16, 32, 64, 96, 128, 160, 192, 224, 256, 288,
+  ];
+
+  /// Tabella del bonus colore: più colori DIVERSI scoppiano nello stesso
+  /// anello, più alto il bonus — è ciò che rende preziosi gli scoppi
+  /// "multicolore" simultanei, e non solo le catene lunghe di un solo
+  /// colore.
+  static const List<int> _colorBonusTable = [0, 3, 6, 12, 24];
+
+  /// Punti assegnati per UN anello della catena (uno scoppio simultaneo
+  /// di uno o più gruppi), secondo la formula del gioco originale:
+  /// `puyo_eliminati * 10 * bonus`, dove `bonus` è la somma di tre
+  /// componenti — chain power, bonus colore, bonus gruppo — con un minimo
+  /// di 1 (mai zero, altrimenti anche scoppi "validi" darebbero 0 punti).
+  int _scoreForLink({required int chainNumber, required List<List<PuyoComponent>> groups}) {
+    final totalPuyosCleared = groups.fold(0, (sum, group) => sum + group.length);
+    final distinctColors = groups.map((group) => group.first.color).toSet();
+
+    final chainPower = _chainPowerTable[(chainNumber - 1).clamp(0, _chainPowerTable.length - 1)];
+    final colorBonus = _colorBonusTable[(distinctColors.length - 1).clamp(0, _colorBonusTable.length - 1)];
+    final groupBonus = groups.fold(0, (sum, group) => sum + _groupBonus(group.length));
+
+    final bonus = chainPower + colorBonus + groupBonus;
+    return totalPuyosCleared * 10 * (bonus == 0 ? 1 : bonus);
+  }
+
+  /// Bonus per la dimensione di un singolo gruppo che scoppia: i 5 Puyo
+  /// minimi richiesti non danno alcun bonus, ma ogni Puyo in più nello
+  /// stesso gruppo ne aggiunge — premiando i gruppi grandi oltre al
+  /// minimo necessario per scoppiare.
+  int _groupBonus(int groupSize) {
+    if (groupSize <= 5) return 0;
+    if (groupSize == 6) return 2;
+    if (groupSize == 7) return 3;
+    if (groupSize == 8) return 4;
+    if (groupSize <= 10) return 5;
+    if (groupSize <= 12) return 6;
+    return 10;
+  }
 
   /// Aggiunge punti al totale e aggiorna subito il testo a schermo:
   /// `TextComponent` si ridisegna da solo quando la sua proprietà `text`
@@ -267,8 +389,6 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
       GridComponent.rows * GridComponent.cellSize,
     ) / 2;
 
-    // `_scoreText` ha l'anchor di default (Anchor.topLeft): posizionarlo
-    // significa indicare dove va il suo angolo in alto a sinistra. Lo
     // mettiamo subito a destra del bordo destro della griglia
     // (`gridHalfSize.x` oltre al centro), allineato al suo bordo superiore.
     final sidebarX = _grid.position.x + gridHalfSize.x + 24;
@@ -282,4 +402,6 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
     _nextPiecePreview.position = Vector2(sidebarX, sidebarTop + 80);
   }
 }
+
+
 

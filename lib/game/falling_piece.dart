@@ -1,3 +1,5 @@
+import 'dart:ui' show Canvas, Offset;
+
 import 'package:flame/components.dart';
 import 'package:flutter/material.dart' show Color;
 import 'package:flutter/services.dart'
@@ -93,6 +95,38 @@ class FallingPiece extends PositionComponent with KeyboardHandler {
 
   bool _isSoftDropping = false;
 
+  /// Colonna corrente del pivot. Esposta in lettura per `AiController`
+  /// (vedi `ai_controller.dart`), che deve sapere dove si trova il pezzo
+  /// per decidere se spostarlo a sinistra o a destra verso la colonna
+  /// scelta dall'AI.
+  int get pivotColumn => _pivotColumn;
+
+  /// Offset correnti della forma. Esposti in lettura per `puyo_ai.dart`,
+  /// che li usa come punto di partenza per simulare le rotazioni possibili.
+  List<GridOffset> get offsets => _offsets;
+
+  /// Vero una volta che il pezzo si è bloccato. `AiController` lo controlla
+  /// per sapere quando smettere di pilotarlo.
+  bool get isLocked => _isLocked;
+
+  /// Sposta il pezzo di una colonna a sinistra, se possibile. Equivalente,
+  /// per un controllore esterno come `AiController`, alla freccia Sinistra.
+  void moveLeft() => _tryShiftHorizontally(-1);
+
+  /// Sposta il pezzo di una colonna a destra, se possibile. Equivalente,
+  /// per un controllore esterno come `AiController`, alla freccia Destra.
+  void moveRight() => _tryShiftHorizontally(1);
+
+  /// Ruota il pezzo di 90° in senso orario, se possibile. Equivalente,
+  /// per un controllore esterno come `AiController`, alla freccia Su.
+  void rotateClockwise() => _tryRotateClockwise();
+
+  /// Attiva o disattiva la caduta accelerata. `AiController` lo usa al
+  /// posto della pressione continua della freccia Giù.
+  void setSoftDropping(bool value) {
+    _isSoftDropping = value;
+  }
+
   /// Avanzamento CONTINUO della caduta, in pixel, all'interno della riga
   /// corrente (`_pivotRow`): cresce con continuità da 0 a `cellSize`.
   /// La posizione verticale "vera" di ogni blocco è sempre
@@ -122,6 +156,53 @@ class FallingPiece extends PositionComponent with KeyboardHandler {
       _blocks.add(block);
       add(block);
     }
+  }
+
+  @override
+  void render(Canvas canvas) {
+    super.render(canvas);
+
+    if (_isLocked) return;
+    _renderGhost(canvas);
+  }
+
+  /// Disegna, nella colonna/righe in cui il pezzo atterrerebbe se lo si
+  /// lasciasse cadere subito, una versione semitrasparente dei suoi
+  /// blocchi (`paintPuyoGhost`) — il classico "ghost piece" che aiuta a
+  /// pianificare la mossa senza dover indovinare a occhio dove andrà a
+  /// finire.
+  void _renderGhost(Canvas canvas) {
+    final ghostPivotRow = _computeGhostPivotRow();
+    if (ghostPivotRow == _pivotRow) {
+      // Il pezzo è già praticamente atterrato: un fantasma sovrapposto al
+      // pezzo vero non aggiungerebbe alcuna informazione.
+      return;
+    }
+
+    const padding = 4.0;
+    final radius = (GridComponent.cellSize - padding * 2) / 2;
+
+    for (final offset in _offsets) {
+      final column = _pivotColumn + offset.column;
+      final row = ghostPivotRow + offset.row;
+      final center = Offset(
+        column * GridComponent.cellSize + GridComponent.cellSize / 2,
+        row * GridComponent.cellSize + GridComponent.cellSize / 2,
+      );
+      paintPuyoGhost(canvas, center: center, radius: radius, color: _color);
+    }
+  }
+
+  /// Simula la caduta libera del pezzo, partendo dalla riga del pivot
+  /// CORRENTE, finché non trova la prima riga in cui non potrebbe più
+  /// scendere: è esattamente la stessa regola di `_canPlace` usata per la
+  /// caduta vera, solo applicata in anticipo e senza muovere nulla.
+  int _computeGhostPivotRow() {
+    var candidateRow = _pivotRow;
+    while (_canPlace(pivotColumn: _pivotColumn, pivotRow: candidateRow + 1, offsets: _offsets)) {
+      candidateRow++;
+    }
+    return candidateRow;
   }
 
   @override
@@ -190,6 +271,10 @@ class FallingPiece extends PositionComponent with KeyboardHandler {
       playfieldGrid.lock(block);
       block.removeFromParent();
       grid?.add(block);
+      // Tocco cosmetico: un piccolo "schiacciamento" elastico al momento
+      // dell'atterraggio, invece del passaggio istantaneo e immobile da
+      // pezzo controllabile a Puyo fermo.
+      block.playLandSquashEffect();
     }
     _blocks.clear();
 

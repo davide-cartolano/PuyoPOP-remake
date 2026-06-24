@@ -1,6 +1,9 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 
 import 'game_screen.dart';
+import 'versus_screen.dart';
 
 /// Schermata iniziale: titolo del gioco e pulsante "Play".
 ///
@@ -40,7 +43,31 @@ class MenuScreen extends StatelessWidget {
                 padding: const EdgeInsets.symmetric(horizontal: 48, vertical: 16),
                 textStyle: const TextStyle(fontSize: 20),
               ),
-              child: const Text('Play'),
+              child: const Text('Gioca da solo'),
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(builder: (context) => const VersusScreen()),
+                );
+              },
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 48, vertical: 16),
+                textStyle: const TextStyle(fontSize: 20),
+              ),
+              child: const Text('Gioca contro CPU'),
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton(
+              onPressed: () {
+                exit(0);
+              },
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 48, vertical: 16),
+                textStyle: const TextStyle(fontSize: 20),
+              ),
+              child: const Text('Esci'),
             ),
           ],
         ),
