@@ -25,10 +25,10 @@ class PlayfieldGrid {
         );
 
   /// Quanti Puyo dello stesso colore, collegati fra loro, servono perché
-  /// un gruppo "scoppi". Tenerlo qui, come costante nominata, rende
-  /// immediato cambiarlo in futuro (es. per una modalità di difficoltà
-  /// diversa) senza andare a caccia del "4" nel codice.
-  static const int _minGroupSizeToClear = 5;
+  /// un gruppo "scoppi": 4, come in Puyo Pop Fever. Pubblica perché anche
+  /// l'AI (`puyo_ai.dart`) deve usare la stessa soglia nelle sue
+  /// simulazioni.
+  static const int minGroupSizeToClear = 4;
 
   /// Le quattro direzioni in cui due Puyo si considerano "adiacenti":
   /// sopra, sotto, sinistra, destra — MAI in diagonale. Ogni elemento è
@@ -93,11 +93,28 @@ class PlayfieldGrid {
     return _cells[row][column]?.color;
   }
 
+  /// Il Puyo bloccato in (column, row), o `null` se la cella è libera o
+  /// fuori dai confini. Usato dall'AI per copiare lo stato della griglia
+  /// (colore + flag spazzatura) nelle sue simulazioni.
+  PuyoComponent? puyoAt(int column, int row) {
+    if (!isInsideBounds(column, row)) return null;
+    return _cells[row][column];
+  }
+
   /// Registra un Puyo come "bloccato" nella sua cella corrente
   /// (`puyo.column`, `puyo.row`). Da questo momento in poi, `isFree` per
   /// quella cella restituirà `false`.
-  void lock(PuyoComponent puyo) {
+  ///
+  /// Restituisce `false` — senza toccare la griglia — se la cella è fuori
+  /// dai confini: succede quando la pila è arrivata in cima e un pezzo si
+  /// blocca con un blocco ancora sopra al bordo (riga negativa). Prima
+  /// questo caso mandava in crash il gioco (`_cells[-1][...]`) proprio al
+  /// momento della sconfitta; ora è il segnale, per chi chiama, che la
+  /// partita è finita.
+  bool lock(PuyoComponent puyo) {
+    if (!isInsideBounds(puyo.column, puyo.row)) return false;
     _cells[puyo.row][puyo.column] = puyo;
+    return true;
   }
 
   /// Cerca tutti i gruppi di Puyo dello stesso colore, collegati in
@@ -124,7 +141,7 @@ class PlayfieldGrid {
         }
 
         final group = _collectGroup(row, column, visited);
-        if (group.length >= _minGroupSizeToClear) {
+        if (group.length >= minGroupSizeToClear) {
           groupsToClear.add(group);
         }
       }
@@ -246,6 +263,38 @@ class PlayfieldGrid {
     for (final puyo in group) {
       _cells[puyo.row][puyo.column] = null;
     }
+  }
+
+  /// Vero se sulla griglia c'è almeno un Puyo spazzatura già caduto.
+  /// Usato dalla barra Fever: gli scoppi la caricano sia quando la
+  /// spazzatura è ancora "in volo" contro di noi (`_pendingGarbage`),
+  /// sia quando è già atterrata e ci sta intralciando il campo.
+  bool hasGarbage() {
+    for (var row = 0; row < GridComponent.rows; row++) {
+      for (var column = 0; column < GridComponent.columns; column++) {
+        final puyo = _cells[row][column];
+        if (puyo != null && puyo.isGarbage) return true;
+      }
+    }
+    return false;
+  }
+
+  /// Svuota COMPLETAMENTE la griglia logica, restituendo tutti i Puyo che
+  /// la occupavano: usato dalla modalità Fever, che sostituisce in blocco
+  /// il campo del giocatore con una board precostruita. Come per `clear`,
+  /// rimuovere i componenti dall'albero grafico spetta al chiamante.
+  List<PuyoComponent> clearAll() {
+    final removed = <PuyoComponent>[];
+    for (var row = 0; row < GridComponent.rows; row++) {
+      for (var column = 0; column < GridComponent.columns; column++) {
+        final puyo = _cells[row][column];
+        if (puyo != null) {
+          removed.add(puyo);
+          _cells[row][column] = null;
+        }
+      }
+    }
+    return removed;
   }
 
   /// Fa "cadere" ogni Puyo rimasto sulla griglia fino alla cella libera

@@ -9,10 +9,14 @@ import 'package:flutter/material.dart' show Colors, FontWeight, TextStyle;
 
 import 'ai_controller.dart';
 import 'falling_piece.dart';
+import 'fever_background.dart';
+import 'fever_gauge_component.dart';
+import 'fever_presets.dart';
 import 'grid_component.dart';
 import 'next_piece_preview.dart';
 import 'piece_shapes.dart';
 import 'playfield_grid.dart';
+import 'puyo_ai.dart';
 import 'puyo_component.dart';
 
 /// Classe principale del gi oco. Estendere FlameGame ci dà accesso al
@@ -26,6 +30,7 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
   PuyoGame({
     required this.onGameOver,
     this.isAiControlled = false,
+    this.aiDifficulty = AiDifficulty.normal,
     this.onSendGarbage,
     this.onPendingGarbageChanged,
   });
@@ -40,6 +45,11 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
   /// che dalla tastiera — è ciò che distingue la griglia della CPU da
   /// quella del giocatore umano nella modalità "Gioca contro CPU".
   final bool isAiControlled;
+
+  /// Difficoltà della CPU (rilevante solo se `isAiControlled`): determina
+  /// velocità, precisione e profondità di ricerca dell'AI — vedi
+  /// `AiDifficulty` in `puyo_ai.dart`.
+  final AiDifficulty aiDifficulty;
 
   /// Invocata ogni volta che una combo di questa partita genera Puyo
   /// spazzatura da inviare all'avversario (vedi `_resolveBoardThenSpawnNext`).
@@ -130,6 +140,10 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
   // deve già esistere per evitare un LateInitializationError.
   final GridComponent _grid = GridComponent();
 
+  /// Sfondo animato (gradiente + bolle + stelle) dietro a tutto il resto:
+  /// riempie l'intera area del gioco, non solo la griglia.
+  final FeverBackground _background = FeverBackground();
+
   /// Testo del punteggio, disegnato a lato della griglia. Lo creiamo già
   /// con il suo contenuto iniziale: lo aggiorneremo in seguito chiamando
   /// `_addScore`, che si limita a cambiarne la stringa `text`.
@@ -150,6 +164,40 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
 
   /// Riquadro che mostra il prossimo pezzo, a lato della griglia.
   final NextPiecePreviewComponent _nextPiecePreview = NextPiecePreviewComponent();
+
+  /// Indicatore della barra Fever (pallini 1-8) e, durante la Fever, del
+  /// tempo rimanente. Vive nella sidebar, sotto all'anteprima.
+  final FeverGaugeComponent _feverGaugeDisplay = FeverGaugeComponent();
+
+  /// Etichetta sopra la barra Fever: "Fever" normalmente, "FEVER!"
+  /// lampeggiante quando la modalità è attiva.
+  final TextComponent _feverLabel = TextComponent(
+    text: 'Fever',
+    textRenderer: TextPaint(
+      style: const TextStyle(color: Colors.white, fontSize: 20),
+    ),
+  );
+
+  // --- Stato della modalità Fever -------------------------------------
+
+  /// Quanto dura la modalità Fever, in secondi.
+  static const double _feverDuration = 45;
+
+  /// Livello corrente della barra Fever (0..8): cresce di 1 per ogni
+  /// anello di catena fatto scoppiare MENTRE c'è spazzatura in sospeso
+  /// contro di noi; a 8 scatta la modalità Fever.
+  int _feverCharge = 0;
+
+  /// Vero mentre la modalità Fever è attiva.
+  bool _isFeverActive = false;
+
+  /// Secondi di Fever rimanenti (conta alla rovescia in `update`).
+  double _feverTimeLeft = 0;
+
+  /// Lunghezza di combo della PROSSIMA board precostruita da caricare:
+  /// parte da `feverMinChain` (4) e cresce di 1 dopo ogni combo innescata,
+  /// fino a `feverMaxChain`.
+  int _feverChainLevel = feverMinChain;
 
   /// Contenitore di TUTTO l'HUD (griglia, punteggio, anteprima): griglia e
   /// sidebar vengono disposte al suo interno con coordinate FISSE (vedi
@@ -192,11 +240,15 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
   Future<void> onLoad() async {
     super.onLoad();
 
+    await add(_background);
+    _background.size = size.clone();
     await add(_hud);
     await _hud.add(_grid);
     await _hud.add(_scoreText);
     await _hud.add(_nextPieceLabel);
     await _hud.add(_nextPiecePreview);
+    await _hud.add(_feverLabel);
+    await _hud.add(_feverGaugeDisplay);
     _layoutHud();
 
     _playfieldGrid = PlayfieldGrid();
@@ -223,6 +275,16 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
     // reale della griglia, senza dover individuare ogni singolo punto del
     // codice che potrebbe alterare l'altezza della pila.
     _grid.isInDanger = _playfieldGrid.isStackInDanger();
+
+    // Conto alla rovescia della Fever: quando il tempo scade, la modalità
+    // finisce e la griglia resta com'è in quel momento (come su PSP).
+    if (_isFeverActive) {
+      _feverTimeLeft -= dt;
+      _feverGaugeDisplay.timeFraction = (_feverTimeLeft / _feverDuration).clamp(0, 1);
+      if (_feverTimeLeft <= 0) {
+        _exitFever();
+      }
+    }
   }
 
   /// Crea un nuovo pezzo controllabile (`FallingPiece`) e lo aggiunge al
@@ -260,8 +322,13 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
     _grid.add(piece);
 
     if (isAiControlled) {
-      _grid.add(AiController(piece: piece, playfieldGrid: _playfieldGrid));
-    }
+      _grid.add(AiController(
+        piece: piece,
+        playfieldGrid: _playfieldGrid,
+        difficulty: aiDifficulty,
+        random: _random,
+      ));
+    } 
   }
 
   /// Fa cadere tutti i Puyo spazzatura accumulati in `_pendingGarbage`,
@@ -309,6 +376,91 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
     }
   }
 
+  // --- Modalità Fever ---------------------------------------------------
+
+  /// Fa salire la barra Fever di `amount` livelli (senza superare 8),
+  /// aggiornando subito l'indicatore a schermo. Chiamata solo mentre c'è
+  /// spazzatura in sospeso contro di noi: è la condizione, richiesta dal
+  /// design, perché gli scoppi "carichino" la Fever.
+  void _chargeFeverGauge(int amount) {
+    _feverCharge = (_feverCharge + amount).clamp(0, FeverGaugeComponent.maxCharge);
+    _feverGaugeDisplay.charge = _feverCharge;
+  }
+
+  /// Entra in modalità Fever: azzera la barra, avvia i 45 secondi,
+  /// svuota completamente la griglia e la sostituisce con la prima board
+  /// precostruita (combo da `feverMinChain`).
+  void _enterFever() {
+    _isFeverActive = true;
+    _feverTimeLeft = _feverDuration;
+    _feverChainLevel = feverMinChain;
+    _feverCharge = 0;
+    _feverGaugeDisplay
+      ..charge = 0
+      ..isActive = true
+      ..timeFraction = 1;
+    _feverLabel.text = 'FEVER!';
+
+    _replaceBoardWithFeverPreset();
+    _showFeverPopup();
+  }
+
+  /// Esce dalla modalità Fever: la griglia resta ESATTAMENTE com'è in quel
+  /// momento (come nella versione PSP) e si torna al gioco normale.
+  void _exitFever() {
+    _isFeverActive = false;
+    _feverGaugeDisplay
+      ..isActive = false
+      ..charge = 0;
+    _feverLabel.text = 'Fever';
+  }
+
+  /// Svuota la griglia (logica + componenti) e vi piazza la board
+  /// precostruita corrispondente a `_feverChainLevel`.
+  void _replaceBoardWithFeverPreset() {
+    for (final puyo in _playfieldGrid.clearAll()) {
+      puyo.removeFromParent();
+    }
+
+    final rows = feverBoardForChain(_feverChainLevel);
+    for (var row = 0; row < rows.length; row++) {
+      for (var column = 0; column < rows[row].length; column++) {
+        final cell = rows[row][column];
+        if (cell == '.') continue;
+
+        final puyo = PuyoComponent(
+          column: column,
+          row: row,
+          color: puyoColors[int.parse(cell)],
+        );
+        _playfieldGrid.lock(puyo);
+        _grid.add(puyo);
+      }
+    }
+  }
+
+  /// Grande scritta "FEVER!" al centro della griglia quando la modalità
+  /// si attiva — stesso meccanismo del popup delle catene, ma più vistosa.
+  void _showFeverPopup() {
+    final popup = TextComponent(
+      text: 'FEVER!',
+      textRenderer: TextPaint(
+        style: const TextStyle(
+          color: Colors.orangeAccent,
+          fontSize: 44,
+          fontWeight: FontWeight.w900,
+        ),
+      ),
+      position: _grid.position.clone(),
+      anchor: Anchor.center,
+      scale: Vector2.zero(),
+    );
+    popup.add(ScaleEffect.to(Vector2.all(1), EffectController(duration: 0.25)));
+    popup.add(MoveByEffect(Vector2(0, -30), EffectController(duration: 1.1)));
+    popup.add(RemoveEffect(delay: 1.1));
+    _hud.add(popup);
+  }
+
   /// Risolve la griglia dopo che un pezzo si è bloccato e separato nei
   /// singoli Puyo indipendenti.
   ///
@@ -328,11 +480,20 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
   /// scoppiare, invece che un collasso istantaneo e indistinguibile di
   /// tutta la catena in un solo istante. Solo quando il `while` termina
   /// (griglia stabile) generiamo il prossimo pezzo.
-  Future<void> _resolveBoardThenSpawnNext() async {
+  Future<void> _resolveBoardThenSpawnNext({required bool toppedOut}) async {
     // Il pezzo si è bloccato: da questo momento (e finché non ne nasce un
     // altro) non c'è alcun pezzo controllabile a cui inoltrare i comandi
     // touch — vedi `moveCurrentPieceLeft/Right`, `rotateCurrentPiece`.
     _currentPiece = null;
+
+    // Un blocco del pezzo è rimasto sopra al bordo della griglia: la pila
+    // è arrivata in cima e la partita finisce subito, senza risolvere
+    // altro — è la gestione (prima mancante, e causa di crash) della
+    // sconfitta "per soffocamento".
+    if (toppedOut) {
+      _triggerGameOver();
+      return;
+    }
 
     // Il pezzo si è appena separato nei suoi Puyo indipendenti: prima di
     // cercare eventuali gruppi, lasciamo che la gravità globale li faccia
@@ -355,6 +516,16 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
       // già una combo di 2 — non di 1 — esattamente come un secondo
       // anello di catena lo sarebbe.
       chainNumber += groups.length;
+
+      // Barra Fever: ogni anello della catena vale +1, ma SOLO mentre
+      // siamo "sotto pressione": spazzatura ancora in sospeso contro di
+      // noi, OPPURE già caduta e presente sulla griglia. Il secondo caso
+      // è essenziale: la spazzatura cade alla prima mossa a vuoto, e
+      // senza questo controllo gli scoppi fatti per liberarsene non
+      // caricherebbero mai la barra.
+      if (!_isFeverActive && (_pendingGarbage > 0 || _playfieldGrid.hasGarbage())) {
+        _chargeFeverGauge(1);
+      }
 
       // Breve pausa "di lettura": il giocatore vede per un istante il
       // gruppo appena formatosi prima che scompaia, invece di un taglio
@@ -402,11 +573,26 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
       // cadere quelli eventualmente accumulati contro di noi — restano in
       // sospeso fino a una nostra mossa "a vuoto".
       _sendGarbageForChain(chainNumber);
-    } else if (_pendingGarbage > 0) {
+    } else if (_pendingGarbage > 0 && !_isFeverActive) {
       // Questo pezzo si è bloccato senza causare alcuno scoppio: è
       // esattamente — e SOLO — in questo momento che la spazzatura
       // accumulata contro di noi cade davvero, prima del prossimo pezzo.
+      // Durante la Fever, invece, la spazzatura resta in sospeso: la
+      // modalità non va "sporcata" da macigni che rovinerebbero le board
+      // precostruite — cadranno alla prima occasione dopo la sua fine.
       await _dropPendingGarbage();
+    }
+
+    if (_isFeverActive && chainNumber > 0) {
+      // Durante la Fever, ogni combo innescata consuma la board corrente:
+      // quel che ne resta viene spazzato via e sostituito da una nuova
+      // board precostruita con una combo ancora più lunga.
+      _feverChainLevel = min(_feverChainLevel + 1, feverMaxChain);
+      _replaceBoardWithFeverPreset();
+    } else if (!_isFeverActive && _feverCharge >= FeverGaugeComponent.maxCharge) {
+      // Barra piena: la Fever parte adesso, PRIMA del prossimo pezzo, con
+      // la griglia appena stabilizzata.
+      _enterFever();
     }
 
     _spawnNewPiece();
@@ -552,6 +738,7 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
   @override
   void onGameResize(Vector2 size) {
     super.onGameResize(size);
+    _background.size = size.clone();
     _layoutHud();
   }
 
@@ -589,6 +776,8 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
     _scoreText.position = Vector2(sidebarX, sidebarTop);
     _nextPieceLabel.position = Vector2(sidebarX, sidebarTop + 48);
     _nextPiecePreview.position = Vector2(sidebarX, sidebarTop + 80);
+    _feverLabel.position = Vector2(sidebarX, sidebarTop + 216);
+    _feverGaugeDisplay.position = Vector2(sidebarX, sidebarTop + 244);
 
     // Scala uniforme (stessa per X e Y, altrimenti la griglia risulterebbe
     // deformata) che fa entrare l'intero contenuto, a dimensione fissa,
@@ -607,6 +796,3 @@ class PuyoGame extends FlameGame with HasKeyboardHandlerComponents {
     _hud.position = (size - scaledContentSize) / 2;
   }
 }
-
-
-

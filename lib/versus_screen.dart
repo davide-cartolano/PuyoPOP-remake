@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flame/game.dart';
 
+import 'game/puyo_ai.dart';
 import 'game/puyo_game.dart';
 
 /// Schermata "Gioca contro CPU": due griglie indipendenti fianco a fianco,
@@ -12,7 +13,10 @@ import 'game/puyo_game.dart';
 /// Come `GameScreen`, è uno `StatefulWidget`: serve un `BuildContext`
 /// stabile a cui aggrapparsi quando una delle due partite finisce.
 class VersusScreen extends StatefulWidget {
-  const VersusScreen({super.key});
+  const VersusScreen({super.key, this.difficulty = AiDifficulty.normal});
+
+  /// Difficoltà scelta nel menu per la CPU avversaria.
+  final AiDifficulty difficulty;
 
   @override
   State<VersusScreen> createState() => _VersusScreenState();
@@ -33,6 +37,7 @@ class _VersusScreenState extends State<VersusScreen> {
 
   late final PuyoGame _cpuGame = PuyoGame(
     isAiControlled: true,
+    aiDifficulty: widget.difficulty,
     onGameOver: () => _showResultDialog(playerLost: false),
     onSendGarbage: (count) => _playerGame.receiveGarbage(count),
     onPendingGarbageChanged: (count) => setState(() => _cpuPendingGarbage = count),
@@ -134,41 +139,63 @@ class _VersusScreenState extends State<VersusScreen> {
     );
   }
 
+  /// La metà di schermo del giocatore: contatore spazzatura + griglia,
+  /// avvolta nel `GestureDetector` che traduce i tocchi in comandi.
+  Widget _buildPlayerSide() {
+    return Column(
+      children: [
+        _buildGarbageCounter('Tu', _playerPendingGarbage),
+        Expanded(
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _playerGame.rotateCurrentPiece,
+            onPanUpdate: _onPanUpdate,
+            onPanEnd: _onPanEnd,
+            onPanCancel: _onPanCancel,
+            child: GameWidget(game: _playerGame),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// La metà di schermo della CPU. `autofocus: false` impedisce a questa
+  /// griglia di intercettare gli eventi tastiera: devono arrivare solo al
+  /// pezzo del giocatore, mai a quello pilotato dall'AI.
+  Widget _buildCpuSide() {
+    return Column(
+      children: [
+        _buildGarbageCounter('CPU (${widget.difficulty.label})', _cpuPendingGarbage),
+        Expanded(child: GameWidget(game: _cpuGame, autofocus: false)),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    // In verticale (telefono in portrait, il caso tipico su Android) le
+    // due partite vengono impilate una sopra l'altra — la CPU in alto,
+    // il giocatore in basso, vicino ai pollici — invece di essere
+    // schiacciate fianco a fianco in due colonne strettissime.
+    final isPortrait = MediaQuery.of(context).orientation == Orientation.portrait;
+
     return Scaffold(
-      body: Row(
-        children: [
-          Expanded(
-            child: Column(
-              children: [
-                _buildGarbageCounter('Tu', _playerPendingGarbage),
-                Expanded(
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onTap: _playerGame.rotateCurrentPiece,
-                    onPanUpdate: _onPanUpdate,
-                    onPanEnd: _onPanEnd,
-                    onPanCancel: _onPanCancel,
-                    child: GameWidget(game: _playerGame),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const VerticalDivider(color: Colors.white24, width: 1),
-          Expanded(
-            child: Column(
-              children: [
-                _buildGarbageCounter('CPU', _cpuPendingGarbage),
-                // `autofocus: false` impedisce a questa griglia di
-                // intercettare gli eventi tastiera: devono arrivare solo
-                // al pezzo del giocatore, mai a quello pilotato dall'AI.
-                Expanded(child: GameWidget(game: _cpuGame, autofocus: false)),
-              ],
-            ),
-          ),
-        ],
+      body: SafeArea(
+        child: isPortrait
+            ? Column(
+                children: [
+                  Expanded(child: _buildCpuSide()),
+                  const Divider(color: Colors.white24, height: 1),
+                  Expanded(child: _buildPlayerSide()),
+                ],
+              )
+            : Row(
+                children: [
+                  Expanded(child: _buildPlayerSide()),
+                  const VerticalDivider(color: Colors.white24, width: 1),
+                  Expanded(child: _buildCpuSide()),
+                ],
+              ),
       ),
     );
   }

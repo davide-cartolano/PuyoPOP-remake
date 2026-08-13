@@ -2,16 +2,16 @@ import 'dart:math' show sin;
 import 'dart:ui';
 
 import 'package:flame/components.dart';
-import 'package:flutter/material.dart' show Colors;
 
-/// Componente che disegna la griglia di gioco: 8 colonne x 15 righe.
+/// Componente che disegna la griglia di gioco: 6 colonne x 12 righe, le
+/// stesse proporzioni del campo di Puyo Pop Fever.
 ///
 /// È un PositionComponent: ha una posizione, una dimensione e un "anchor"
 /// (punto di riferimento per il posizionamento), ed è capace di disegnarsi
 /// da solo sovrascrivendo `render`.
 class GridComponent extends PositionComponent {
-  static const int columns = 8;
-  static const int rows = 15;
+  static const int columns = 6;
+  static const int rows = 12;
 
   /// Lato di ogni cella della griglia, in pixel logici.
   static const double cellSize = 40;
@@ -56,45 +56,45 @@ class GridComponent extends PositionComponent {
   void render(Canvas canvas) {
     super.render(canvas);
 
-    // Pennello per lo sfondo della griglia: un gradiente verticale (notte
-    // stellata, dal blu-viola scuro in alto a un blu più profondo in
-    // basso) invece di un riempimento piatto, per dare al "tavolo di
-    // gioco" un minimo di ambientazione.
+    final boardRect = size.toRect();
+    final boardRRect = RRect.fromRectAndRadius(boardRect, const Radius.circular(10));
+
+    // Fondale della vasca di gioco: un gradiente verticale scuro,
+    // leggermente più trasparente del vecchio riempimento pieno, così lo
+    // sfondo animato (bolle e stelle di `FeverBackground`) traspare
+    // appena sotto i Puyo — l'effetto "acquario" delle schermate di Fever.
     final backgroundPaint = Paint()
       ..shader = Gradient.linear(
-        Offset(0, 0),
+        Offset.zero,
         Offset(0, size.y),
-        [const Color(0xFF1B1B3A), const Color(0xFF0E0E1E)],
+        [const Color(0xCC1B1B3A), const Color(0xE60E0E1E)],
       );
+    canvas.drawRRect(boardRRect, backgroundPaint);
 
-    // Pennello per le linee della griglia.
-    final linePaint = Paint()
-      ..color = Colors.white24
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1;
-
-    // Disegniamo lo sfondo dell'intera area di gioco.
-    // `size.toRect()` converte la dimensione del componente in un Rect
-    // che parte da (0,0): tutto il rendering di un componente avviene nel
-    // suo sistema di coordinate locale, Flame si occupa di traslarlo nella
-    // posizione corretta sullo schermo.
-    canvas.drawRect(size.toRect(), backgroundPaint);
-
-    // Disegniamo le linee verticali (una per ogni colonna, compresi i bordi).
-    for (int col = 0; col <= columns; col++) {
-      final x = col * cellSize;
-      canvas.drawLine(Offset(x, 0), Offset(x, size.y), linePaint);
-    }
-
-    // Disegniamo le linee orizzontali (una per ogni riga, compresi i bordi).
-    for (int row = 0; row <= rows; row++) {
-      final y = row * cellSize;
-      canvas.drawLine(Offset(0, y), Offset(size.x, y), linePaint);
+    // Scacchiera sottile al posto delle linee dure: colonne alternate
+    // appena più chiare, più vicine al look pulito del gioco originale
+    // delle vecchie linee bianche a griglia.
+    final altColumnPaint = Paint()..color = const Color(0x0AFFFFFF);
+    for (int col = 0; col < columns; col += 2) {
+      canvas.drawRect(Rect.fromLTWH(col * cellSize, 0, cellSize, size.y), altColumnPaint);
     }
 
     if (isInDanger) {
       _renderDangerOverlay(canvas);
     }
+
+    // Cornice luminosa attorno al campo, sopra a tutto il resto.
+    final framePaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3
+      ..color = const Color(0xFF6C5CE7);
+    canvas.drawRRect(boardRRect, framePaint);
+
+    final innerFramePaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1
+      ..color = const Color(0x55FFFFFF);
+    canvas.drawRRect(boardRRect.deflate(2), innerFramePaint);
   }
 
   /// Sovrappone un velo rosso pulsante sulle righe più alte della

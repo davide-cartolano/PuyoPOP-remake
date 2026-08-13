@@ -1,6 +1,6 @@
 import 'dart:math';
 
-import 'package:flutter/material.dart' show Color, Colors;
+import 'package:flutter/material.dart' show Color;
 
 /// Una coppia (colonna, riga) che rappresenta uno spostamento RELATIVO
 /// all'interno della griglia. La usiamo per due cose:
@@ -154,14 +154,20 @@ class PieceSpec {
   final Color color;
 }
 
-/// I cinque colori tra cui viene scelto quello di ogni nuovo pezzo:
-/// Rosso, Verde, Giallo, Blu, Rosa.
-const _puyoColors = [
-  Colors.red,
-  Colors.green,
-  Colors.yellow,
-  Colors.blue,
-  Colors.pink,
+/// I cinque colori tra cui viene scelto quello di ogni nuovo pezzo —
+/// la palette classica di Puyo Pop Fever: Rosso, Verde, Giallo, Blu,
+/// Viola, in tinte vivide e sature come nel gioco originale.
+///
+/// Pubblica perché le board precostruite della modalità Fever
+/// (`fever_presets.dart`) referenziano i colori per indice in questa
+/// stessa lista: devono essere ESATTAMENTE gli stessi oggetti `Color` dei
+/// pezzi normali, o i gruppi misti preset+pezzo non scoppierebbero mai.
+const puyoColors = [
+  Color(0xFFE53935),
+  Color(0xFF43A047),
+  Color(0xFFFDD835),
+  Color(0xFF1E88E5),
+  Color(0xFF8E24AA),
 ];
 
 /// Da quanti "turni" (pezzi generati) ciascun colore non viene scelto.
@@ -172,7 +178,7 @@ const _puyoColors = [
 /// Tutti i pezzi della partita condividono la stessa mappa, proprio come
 /// condividono la stessa sorgente `Random`.
 final Map<Color, int> _turnsSinceColorWasPicked = {
-  for (final color in _puyoColors) color: 0,
+  for (final color in puyoColors) color: 0,
 };
 
 /// Sceglie il colore del prossimo pezzo con una casualità "pesata": più
@@ -189,12 +195,12 @@ final Map<Color, int> _turnsSinceColorWasPicked = {
 /// "selezione pesata" (roulette-wheel selection).
 Color _pickNextPieceColor(Random random) {
   final weights = [
-    for (final color in _puyoColors) _turnsSinceColorWasPicked[color]! + 1,
+    for (final color in puyoColors) _turnsSinceColorWasPicked[color]! + 1,
   ];
   final totalWeight = weights.reduce((sum, weight) => sum + weight);
 
   var roll = random.nextInt(totalWeight);
-  var chosenIndex = _puyoColors.length - 1;
+  var chosenIndex = puyoColors.length - 1;
   for (var index = 0; index < weights.length; index++) {
     if (roll < weights[index]) {
       chosenIndex = index;
@@ -207,12 +213,12 @@ Color _pickNextPieceColor(Random random) {
   // assenza (il suo peso scenderà al minimo), tutti gli altri ne
   // accumulano uno in più (il loro peso — e quindi la loro probabilità —
   // crescerà al prossimo giro).
-  for (var index = 0; index < _puyoColors.length; index++) {
-    final color = _puyoColors[index];
+  for (var index = 0; index < puyoColors.length; index++) {
+    final color = puyoColors[index];
     _turnsSinceColorWasPicked[color] = index == chosenIndex ? 0 : _turnsSinceColorWasPicked[color]! + 1;
   }
 
-  return _puyoColors[chosenIndex];
+  return puyoColors[chosenIndex];
 }
 
 /// Genera la coppia forma+colore del prossimo pezzo. È la funzione che

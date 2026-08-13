@@ -68,7 +68,11 @@ class FallingPiece extends PositionComponent with KeyboardHandler {
 
   /// Invocata quando il pezzo si blocca. `PuyoGame` la userà per generare
   /// subito il pezzo successivo: è così che otteniamo lo "spawn continuo".
-  final void Function() onLocked;
+  /// `toppedOut` è vero se almeno un blocco del pezzo è rimasto SOPRA al
+  /// bordo superiore della griglia (riga negativa): la pila è arrivata in
+  /// cima e la partita va chiusa — prima questo caso non era gestito e
+  /// mandava in crash `PlayfieldGrid.lock`.
+  final void Function({required bool toppedOut}) onLocked;
 
   /// Offset (relativi al pivot) che definiscono la forma corrente. Il
   /// primo elemento è sempre (0, 0): è il blocco pivot, il perno di
@@ -108,6 +112,10 @@ class FallingPiece extends PositionComponent with KeyboardHandler {
   /// Vero una volta che il pezzo si è bloccato. `AiController` lo controlla
   /// per sapere quando smettere di pilotarlo.
   bool get isLocked => _isLocked;
+
+  /// Colore (unico) del pezzo. Esposto per l'AI, che ne ha bisogno per
+  /// simulare i gruppi che il piazzamento formerebbe.
+  Color get color => _color;
 
   /// Sposta il pezzo di una colonna a sinistra, se possibile. Equivalente,
   /// per un controllore esterno come `AiController`, alla freccia Sinistra.
@@ -266,9 +274,16 @@ class FallingPiece extends PositionComponent with KeyboardHandler {
     _isLocked = true;
     _isSoftDropping = false;
 
+    var toppedOut = false;
     final grid = parent;
     for (final block in _blocks) {
-      playfieldGrid.lock(block);
+      if (!playfieldGrid.lock(block)) {
+        // Blocco rimasto sopra al bordo della griglia: non entra nella
+        // pila, sparisce e basta — ma segna la fine della partita.
+        toppedOut = true;
+        block.removeFromParent();
+        continue;
+      }
       block.removeFromParent();
       grid?.add(block);
       // Tocco cosmetico: un piccolo "schiacciamento" elastico al momento
@@ -279,7 +294,7 @@ class FallingPiece extends PositionComponent with KeyboardHandler {
     _blocks.clear();
 
     removeFromParent();
-    onLocked();
+    onLocked(toppedOut: toppedOut);
   }
 
   @override
